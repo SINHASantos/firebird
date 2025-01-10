@@ -127,6 +127,7 @@ const USHORT RPB_s_no_data	= 0x02;	// nobody is going to access the data
 const USHORT RPB_s_sweeper	= 0x04;	// garbage collector - skip swept pages
 const USHORT RPB_s_unstable = 0x08;	// don't use undo log, used with unstable explicit cursors
 const USHORT RPB_s_bulk		= 0x10;	// bulk operation (currently insert only)
+const USHORT RPB_s_skipLocked = 0x20;	// skip locked record
 
 // Runtime flags
 
@@ -173,14 +174,15 @@ private:
 		void invalidate()
 		{
 			gmtTimeStamp.invalidate();
+			localTimeStampValid = localTimeValid = false;
 		}
 
 		ISC_TIMESTAMP getLocalTimeStamp(USHORT currentTimeZone) const
 		{
 			fb_assert(!gmtTimeStamp.isEmpty());
 
-			if (timeZone != currentTimeZone)
-				update(currentTimeZone);
+			if (!localTimeStampValid || timeZone != currentTimeZone)
+				update(currentTimeZone, true);
 
 			return localTimeStamp;
 		}
@@ -194,7 +196,7 @@ private:
 		void setGmtTimeStamp(USHORT currentTimeZone, ISC_TIMESTAMP ts)
 		{
 			gmtTimeStamp = ts;
-			update(currentTimeZone);
+			update(currentTimeZone, false);
 		}
 
 		ISC_TIMESTAMP_TZ getTimeStampTz(USHORT currentTimeZone) const
@@ -214,7 +216,7 @@ private:
 			ISC_TIME_TZ timeTz;
 
 			if (timeZone != currentTimeZone)
-				update(currentTimeZone);
+				update(currentTimeZone, false);
 
 			if (localTimeValid)
 			{
@@ -241,15 +243,20 @@ private:
 			if (gmtTimeStamp.isEmpty())
 			{
 				Firebird::TimeZoneUtil::validateGmtTimeStamp(gmtTimeStamp);
-				update(currentTimeZone);
+				update(currentTimeZone, false);
 			}
 		}
 
 	private:
-		void update(USHORT currentTimeZone) const
+		void update(USHORT currentTimeZone, bool updateLocalTimeStamp) const
 		{
-			localTimeStamp = Firebird::TimeZoneUtil::timeStampTzToTimeStamp(
-				getTimeStampTz(currentTimeZone), currentTimeZone);
+			if (updateLocalTimeStamp)
+			{
+				localTimeStamp = Firebird::TimeZoneUtil::timeStampTzToTimeStamp(
+					getTimeStampTz(currentTimeZone), currentTimeZone);
+			}
+
+			localTimeStampValid = updateLocalTimeStamp;
 			timeZone = currentTimeZone;
 			localTimeValid = false;
 		}
@@ -257,11 +264,12 @@ private:
 	private:
 		Firebird::TimeStamp gmtTimeStamp;		// Start time of request in GMT time zone
 
+		mutable bool localTimeStampValid;		// localTimeStamp calculation is expensive. So is it valid (calculated)?
+		mutable bool localTimeValid;			// localTime calculation is expensive. So is it valid (calculated)?
 		// These are valid only when !gmtTimeStamp.isEmpty(), so no initialization is necessary.
 		mutable ISC_TIMESTAMP localTimeStamp;	// Timestamp in timeZone's zone
 		mutable ISC_USHORT timeZone;			// Timezone borrowed from the attachment when updated
 		mutable ISC_TIME localTime;				// gmtTimeStamp converted to local time (WITH TZ)
-		mutable bool localTimeValid;			// localTime calculation is expensive. So is it valid (calculated)?
 	};
 
 	// Fields to support read consistency in READ COMMITTED transactions

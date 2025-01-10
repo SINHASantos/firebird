@@ -47,6 +47,7 @@
 #include "../jrd/replication/Applier.h"
 #include "../jrd/replication/Manager.h"
 
+#include "../dsql/DsqlBatch.h"
 #include "../dsql/DsqlStatementCache.h"
 
 #include "../common/classes/fb_string.h"
@@ -265,6 +266,7 @@ Jrd::Attachment::Attachment(MemoryPool* pool, Database* dbb, JProvider* provider
 	  att_generators(*pool),
 	  att_internal(*pool),
 	  att_dyn_req(*pool),
+	  att_internal_cached_statements(*pool),
 	  att_dec_status(DecimalStatus::DEFAULT),
 	  att_charsets(*pool),
 	  att_charset_ids(*pool),
@@ -286,9 +288,6 @@ Jrd::Attachment::~Attachment()
 		att_idle_timer->stop();
 
 	delete att_trace_manager;
-
-	for (unsigned n = 0; n < att_batches.getCount(); ++n)
-		att_batches[n]->resetHandle();
 
 	for (Function** iter = att_functions.begin(); iter < att_functions.end(); ++iter)
 	{
@@ -448,6 +447,12 @@ void Jrd::Attachment::storeBinaryBlob(thread_db* tdbb, jrd_tra* transaction,
 	blob->BLB_close(tdbb);
 }
 
+void Jrd::Attachment::releaseBatches()
+{
+	while (att_batches.hasData())
+		delete att_batches.pop();
+}
+
 void Jrd::Attachment::releaseGTTs(thread_db* tdbb)
 {
 	if (!att_relations)
@@ -602,6 +607,12 @@ void Jrd::Attachment::resetSession(thread_db* tdbb, jrd_tra** traHandle)
 	}
 	catch (const Exception& ex)
 	{
+		if (att_ext_call_depth && !shutAtt)
+		{
+			flags.release(ATT_resetting);		// reset is incomplete - keep state
+			shutAtt = true;
+		}
+
 		if (shutAtt)
 			signalShutdown(isc_ses_reset_failed);
 
@@ -637,11 +648,15 @@ void Jrd::Attachment::signalShutdown(ISC_STATUS code)
 }
 
 
-void Jrd::Attachment::mergeStats()
+void Jrd::Attachment::mergeStats(bool pageStatsOnly)
 {
 	MutexLockGuard guard(att_database->dbb_stats_mutex, FB_FUNCTION);
-	att_database->dbb_stats.adjust(att_base_stats, att_stats, true);
-	att_base_stats.assign(att_stats);
+	att_database->dbb_stats.adjustPageStats(att_base_stats, att_stats);
+	if (!pageStatsOnly)
+	{
+		att_database->dbb_stats.adjust(att_base_stats, att_stats, true);
+		att_base_stats.assign(att_stats);
+	}
 }
 
 
@@ -671,9 +686,15 @@ Request* Jrd::Attachment::findSystemRequest(thread_db* tdbb, USHORT id, USHORT w
 
 	//Database::CheckoutLockGuard guard(this, dbb_cmp_clone_mutex);
 
-	fb_assert(which == IRQ_REQUESTS || which == DYN_REQUESTS);
+	fb_assert(which == IRQ_REQUESTS || which == DYN_REQUESTS || which == CACHED_REQUESTS);
 
-	Statement* statement = (which == IRQ_REQUESTS ? att_internal[id] : att_dyn_req[id]);
+	if (which == CACHED_REQUESTS && id >= att_internal_cached_statements.getCount())
+		att_internal_cached_statements.grow(id + 1);
+
+	Statement* statement =
+		which == IRQ_REQUESTS ? att_internal[id] :
+		which == DYN_REQUESTS ? att_dyn_req[id] :
+		att_internal_cached_statements[id];
 
 	if (!statement)
 		return NULL;
@@ -1066,7 +1087,7 @@ void StableAttachmentPart::doOnIdleTimer(TimerImpl*)
 	JRD_shutdown_attachment(att);
 }
 
-JAttachment* Attachment::getInterface() throw()
+JAttachment* Attachment::getInterface() noexcept
 {
 	return att_stable->getInterface();
 }
@@ -1131,17 +1152,6 @@ void Attachment::checkReplSetLock(thread_db* tdbb)
 
 void Attachment::invalidateReplSet(thread_db* tdbb, bool broadcast)
 {
-	att_flags |= ATT_repl_reset;
-
-	if (att_relations)
-	{
-		for (auto relation : *att_relations)
-		{
-			if (relation)
-				relation->rel_repl_state.invalidate();
-		}
-	}
-
 	if (broadcast)
 	{
 		// Signal other attachments about the changed state
@@ -1149,6 +1159,20 @@ void Attachment::invalidateReplSet(thread_db* tdbb, bool broadcast)
 			LCK_lock(tdbb, att_repl_lock, LCK_EX, LCK_WAIT);
 		else
 			LCK_convert(tdbb, att_repl_lock, LCK_EX, LCK_WAIT);
+	}
+
+	if (att_flags & ATT_repl_reset)
+		return;
+
+	att_flags |= ATT_repl_reset;
+
+	if (att_relations)
+	{
+		for (auto relation : *att_relations)
+		{
+			if (relation)
+				relation->rel_repl_state.reset();
+		}
 	}
 
 	LCK_release(tdbb, att_repl_lock);
@@ -1194,7 +1218,16 @@ bool Attachment::isProfilerActive()
 	return att_profiler_manager && att_profiler_manager->isActive();
 }
 
-void Attachment::releaseProfilerManager()
+void Attachment::releaseProfilerManager(thread_db* tdbb)
 {
-	att_profiler_manager.reset();
+	if (!att_profiler_manager)
+		return;
+
+	if (att_profiler_manager->haveListener())
+	{
+		EngineCheckout cout(tdbb, FB_FUNCTION);
+		att_profiler_manager.reset();
+	}
+	else
+		att_profiler_manager.reset();
 }

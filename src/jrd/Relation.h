@@ -22,12 +22,14 @@
 #ifndef JRD_RELATION_H
 #define JRD_RELATION_H
 
+#include <optional>
 #include "../jrd/jrd.h"
 #include "../jrd/btr.h"
 #include "../jrd/lck.h"
 #include "../jrd/pag.h"
 #include "../jrd/val.h"
 #include "../jrd/Attachment.h"
+#include "../common/classes/TriState.h"
 
 namespace Jrd
 {
@@ -262,9 +264,9 @@ public:
 	TrigVector*	rel_post_store;			// Post-operation store trigger
 	prim		rel_primary_dpnds;		// foreign dependencies on this relation's primary key
 	frgn		rel_foreign_refs;		// foreign references to other relations' primary keys
-	Nullable<bool>	rel_ss_definer;
 
-	TriState	rel_repl_state;			// replication state
+	Firebird::TriState	rel_ss_definer;
+	Firebird::TriState	rel_repl_state;			// replication state
 
 	Firebird::Mutex rel_drop_mutex;
 
@@ -272,6 +274,11 @@ public:
 	bool isTemporary() const;
 	bool isVirtual() const;
 	bool isView() const;
+
+	ObjectType getObjectType() const
+	{
+		return isView() ? obj_view : obj_relation;
+	}
 
 	bool isReplicating(thread_db* tdbb);
 
@@ -386,11 +393,9 @@ const ULONG REL_deleted					= 0x0004;	// Relation known gonzo
 const ULONG REL_get_dependencies		= 0x0008;	// New relation needs dependencies during scan
 const ULONG REL_check_existence			= 0x0010;	// Existence lock released pending drop of relation
 const ULONG REL_blocking				= 0x0020;	// Blocking someone from dropping relation
-const ULONG REL_sys_triggers			= 0x0040;	// The relation has system triggers to compile
 const ULONG REL_sql_relation			= 0x0080;	// Relation defined as sql table
 const ULONG REL_check_partners			= 0x0100;	// Rescan primary dependencies and foreign references
 const ULONG REL_being_scanned			= 0x0200;	// relation scan in progress
-const ULONG REL_sys_trigs_being_loaded	= 0x0400;	// System triggers being loaded
 const ULONG REL_deleting				= 0x0800;	// relation delete in progress
 const ULONG REL_temp_tran				= 0x1000;	// relation is a GTT delete rows
 const ULONG REL_temp_conn				= 0x2000;	// relation is a GTT preserve rows
@@ -490,7 +495,7 @@ public:
 	MetaName	fld_security_name;	// security class name for field
 	MetaName	fld_generator_name;	// identity generator name
 	MetaNamePair	fld_source_rel_field;	// Relation/field source name
-	Nullable<IdentityType> fld_identity_type;
+	std::optional<IdentityType> fld_identity_type;
 	USHORT fld_flags;
 
 public:

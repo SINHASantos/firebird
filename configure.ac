@@ -26,9 +26,19 @@ dnl XE_CONF_DIR(param, help, variable, default)
 define([XE_CONF_DIR],[
 AC_ARG_WITH([$1],
 	[AS_HELP_STRING([--with-$1],[$2])],
-	[[$3]="$withval"
-	 CHANGE_PATH_SUPPORT=no
-	 AC_DEFINE_UNQUOTED([$3], "$[$3]", [$2])],
+	[
+		case "$withval" in
+			/*)
+				CHANGE_PATH_SUPPORT=no
+				[$3]="$withval"
+				;;
+			*)
+				[$3]='${fb_install_prefix}'/"${withval}"
+				;;
+		esac
+
+		AC_DEFINE_UNQUOTED([$3], "${withval}", [$2])
+	],
 	[[$3]='${fb_install_prefix}[$4]'
 	 AC_DEFINE_UNQUOTED([$3], [""], [$2])]
 )
@@ -95,6 +105,9 @@ dnl      SHRLIB_EXT       : suffix of shared library files
 RAW_DEVICES_FLG=Y
 EXPORT_SYMBOLS_STYLE=linux
 INSTALL_PREFIX=""
+
+dnl do not use additional atomic support library by default
+ATOMICLIB=
 
 dnl Use /usr/lib for library links on most platforms except some 64-bit ones
 libdir=/usr/lib
@@ -310,6 +323,7 @@ dnl CPU_TYPE=ppc64
     SHRLIB_EXT=so
     CPU_TYPE=arm32
     STD_EDITLINE=true
+    ATOMICLIB=atomic
     ;;
 
   aarch64*-*-linux*)
@@ -668,17 +682,17 @@ AC_ARG_WITH(system-re2,
   [RE2_BUILD=N])
 AC_SUBST(RE2_BUILD)
 
+dnl set required atomic support library
+AC_ARG_WITH(atomiclib,
+  [  --with-atomiclib        build with explicitly specified atomic support library],
+  [ATOMICLIB=${withval}])
+
 dnl This is currently used for internal and public (API headers) needs
 SYSTEM_BOOST=N
 AC_ARG_WITH(system-boost,
   [  --with-system-boost     use system-wide boost library instead of embedded copy],
   [SYSTEM_BOOST=Y])
 AC_SUBST(SYSTEM_BOOST)
-
-ATOMICLIB=atomic
-AC_ARG_WITH(atomiclib,
-  [  --with-atomiclib        build with explicitly specified atomic support library],
-  [ATOMICLIB=${withval}])
 
 dnl Avoid dumb '-g -O2' autoconf's default
 dnl Debugging information and optimization flags should be set in prefix.$platform file
@@ -1034,7 +1048,9 @@ dnl Check for libraries
 AC_SEARCH_LIBS(dlopen, dl)
 AC_CHECK_LIB(m, main)
 AC_SEARCH_LIBS(inet_aton, resolv)
-AC_CHECK_LIB($ATOMICLIB, main)
+if test "$ATOMICLIB"; then
+	AC_CHECK_LIB($ATOMICLIB, main)
+fi
 
 dnl Check for libraries for static C++ runtime linking
 AC_CHECK_LIB(supc++, main, XE_APPEND(-lsupc++, STATIC_CXXSUPPORT_LIB))
@@ -1244,18 +1260,6 @@ AC_CHECK_TYPES([socklen_t],,,[#include <sys/socket.h>])
 AH_BOTTOM([#ifndef HAVE_SOCKLEN_T
 typedef int socklen_t;
 #endif])
-AC_CHECK_TYPES([semun])
-if test "$ac_cv_type_semun" = "no"; then
-  AC_MSG_CHECKING(if sem.h defines semun)
-  AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <sys/types.h>
-      #include <sys/ipc.h>
-      #include <sys/sem.h>]], [[union semun s;]])],[ac_cv_type_semun=yes; AC_DEFINE(HAVE_SEMUN) AC_MSG_RESULT(yes)],[AC_MSG_RESULT(no)])
-fi
-
-AC_CHECK_TYPES([struct XDR::xdr_ops],,,[#include <rpc/rpc.h>
-#include <rpc/xdr.h>])
-AC_CHECK_TYPES([struct xdr_ops],,,[#include <rpc/rpc.h>
-#include <rpc/xdr.h>])
 
 dnl AC_STRUCT_DIRENT_D_TYPE
 AC_CHECK_MEMBER([struct dirent.d_type],
@@ -1264,28 +1268,15 @@ AC_CHECK_MEMBER([struct dirent.d_type],
 
 dnl EKU: try to determine the alignment of long and double
 dnl      replaces FB_ALIGNMENT and FB_DOUBLE_ALIGN in src/jrd/common.h
-AC_MSG_CHECKING(alignment of long)
-AC_RUN_IFELSE([AC_LANG_SOURCE([[#include <semaphore.h>
-int main () {
-  struct s {
-    char a;
-    union { long long x; sem_t y; } b;
-  };
-  return (int)&((struct s*)0)->b;
-}]])],[ac_cv_c_alignment=$ac_status],[ac_cv_c_alignment=$ac_status],[])
-AC_MSG_RESULT($ac_cv_c_alignment)
-AC_DEFINE_UNQUOTED(FB_ALIGNMENT, $ac_cv_c_alignment, [Alignment of long])
+AC_CHECK_ALIGNOF([union { long long x; void* y; }])
+if test "$ac_cv_alignof_union___long_long_x__voidp_y___" = "0"; then
+	AC_MSG_ERROR(Failed to detect FB_ALIGNMENT)
+fi
+AC_DEFINE_UNQUOTED(FB_ALIGNMENT, $ac_cv_alignof_union___long_long_x__voidp_y___, [Alignment of long])
 
-AC_MSG_CHECKING(alignment of double)
-AC_RUN_IFELSE([AC_LANG_SOURCE([[int main () {
-  struct s {
-    char a;
-    double b;
-  };
-  return (int)&((struct s*)0)->b;
-}]])],[ac_cv_c_double_align=$ac_status],[ac_cv_c_double_align=$ac_status],[])
-AC_MSG_RESULT($ac_cv_c_double_align)
-AC_DEFINE_UNQUOTED(FB_DOUBLE_ALIGN, $ac_cv_c_double_align, [Alignment of double])
+dnl AC_MSG_CHECKING(alignment of double)
+AC_CHECK_ALIGNOF(double)
+AC_DEFINE_UNQUOTED(FB_DOUBLE_ALIGN, $ac_cv_alignof_double, [Alignment of double])
 
 AC_MSG_CHECKING(correctness of comparing 64-bit integers)
 ac_cv_compare_failed=1
@@ -1644,12 +1635,15 @@ gen/make.platform.solaris.examples:${MAKE_SRC_DIR}/make.platform.solaris.example
 ;;
 esac
 
+# Fix problem with autoconf 2.72 inserting -std in CXX.
+CXX=`echo "$CXX" | sed -e 's/\(-std=c++11\)//g' -e 's/\(-std=gnu++11\)//g'`
+
 AC_OUTPUT
 
 dnl Print out the build configuration (the most interesting thing)
 echo
 echo
-echo The Firebird5 package has been configured with the following options:
+echo The Firebird6 package has been configured with the following options:
 echo
 
 case $DEVEL_FLG in

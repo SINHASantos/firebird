@@ -1914,6 +1914,7 @@ namespace Firebird
 		static CLOOP_CONSTEXPR unsigned PREPARE_PREFETCH_DETAILED_PLAN = 0x10;
 		static CLOOP_CONSTEXPR unsigned PREPARE_PREFETCH_AFFECTED_RECORDS = 0x20;
 		static CLOOP_CONSTEXPR unsigned PREPARE_PREFETCH_FLAGS = 0x40;
+		static CLOOP_CONSTEXPR unsigned PREPARE_REQUIRE_SEMICOLON = 0x80;
 		static CLOOP_CONSTEXPR unsigned PREPARE_PREFETCH_METADATA = IStatement::PREPARE_PREFETCH_TYPE | IStatement::PREPARE_PREFETCH_FLAGS | IStatement::PREPARE_PREFETCH_INPUT_PARAMETERS | IStatement::PREPARE_PREFETCH_OUTPUT_PARAMETERS;
 		static CLOOP_CONSTEXPR unsigned PREPARE_PREFETCH_ALL = IStatement::PREPARE_PREFETCH_METADATA | IStatement::PREPARE_PREFETCH_LEGACY_PLAN | IStatement::PREPARE_PREFETCH_DETAILED_PLAN | IStatement::PREPARE_PREFETCH_AFFECTED_RECORDS;
 		static CLOOP_CONSTEXPR unsigned FLAG_HAS_CURSOR = 0x1;
@@ -3062,6 +3063,7 @@ namespace Firebird
 		static CLOOP_CONSTEXPR int AUTH_SUCCESS = 0;
 		static CLOOP_CONSTEXPR int AUTH_MORE_DATA = 1;
 		static CLOOP_CONSTEXPR int AUTH_CONTINUE = 2;
+		static CLOOP_CONSTEXPR int AUTH_SUCCESS_WITH_DATA = 3;
 	};
 
 #define FIREBIRD_IWRITER_VERSION 2u
@@ -3890,7 +3892,7 @@ namespace Firebird
 		}
 	};
 
-#define FIREBIRD_ICRYPT_KEY_CALLBACK_VERSION 2u
+#define FIREBIRD_ICRYPT_KEY_CALLBACK_VERSION 3u
 
 	class ICryptKeyCallback : public IVersioned
 	{
@@ -3898,6 +3900,8 @@ namespace Firebird
 		struct VTable : public IVersioned::VTable
 		{
 			unsigned (CLOOP_CARG *callback)(ICryptKeyCallback* self, unsigned dataLength, const void* data, unsigned bufferLength, void* buffer) CLOOP_NOEXCEPT;
+			unsigned (CLOOP_CARG *afterAttach)(ICryptKeyCallback* self, IStatus* status, const char* dbName, const IStatus* attStatus) CLOOP_NOEXCEPT;
+			void (CLOOP_CARG *dispose)(ICryptKeyCallback* self) CLOOP_NOEXCEPT;
 		};
 
 	protected:
@@ -3913,10 +3917,36 @@ namespace Firebird
 	public:
 		static CLOOP_CONSTEXPR unsigned VERSION = FIREBIRD_ICRYPT_KEY_CALLBACK_VERSION;
 
+		static CLOOP_CONSTEXPR unsigned NO_RETRY = 0;
+		static CLOOP_CONSTEXPR unsigned DO_RETRY = 1;
+
 		unsigned callback(unsigned dataLength, const void* data, unsigned bufferLength, void* buffer)
 		{
 			unsigned ret = static_cast<VTable*>(this->cloopVTable)->callback(this, dataLength, data, bufferLength, buffer);
 			return ret;
+		}
+
+		template <typename StatusType> unsigned afterAttach(StatusType* status, const char* dbName, const IStatus* attStatus)
+		{
+			if (cloopVTable->version < 3)
+			{
+				StatusType::setVersionError(status, "ICryptKeyCallback", cloopVTable->version, 3);
+				StatusType::checkException(status);
+				return 0;
+			}
+			StatusType::clearException(status);
+			unsigned ret = static_cast<VTable*>(this->cloopVTable)->afterAttach(this, status, dbName, attStatus);
+			StatusType::checkException(status);
+			return ret;
+		}
+
+		void dispose()
+		{
+			if (cloopVTable->version < 3)
+			{
+				return;
+			}
+			static_cast<VTable*>(this->cloopVTable)->dispose(this);
 		}
 	};
 
@@ -6313,7 +6343,7 @@ namespace Firebird
 		{
 			if (cloopVTable->version < 4)
 			{
-				return 0;
+				return true;
 			}
 			FB_BOOLEAN ret = static_cast<VTable*>(this->cloopVTable)->trace_dsql_restart(this, connection, transaction, statement, number);
 			return ret;
@@ -6323,7 +6353,7 @@ namespace Firebird
 		{
 			if (cloopVTable->version < 5)
 			{
-				return 0;
+				return true;
 			}
 			FB_BOOLEAN ret = static_cast<VTable*>(this->cloopVTable)->trace_proc_compile(this, connection, procedure, time_millis, proc_result);
 			return ret;
@@ -6333,7 +6363,7 @@ namespace Firebird
 		{
 			if (cloopVTable->version < 5)
 			{
-				return 0;
+				return true;
 			}
 			FB_BOOLEAN ret = static_cast<VTable*>(this->cloopVTable)->trace_func_compile(this, connection, function, time_millis, func_result);
 			return ret;
@@ -6343,7 +6373,7 @@ namespace Firebird
 		{
 			if (cloopVTable->version < 5)
 			{
-				return 0;
+				return true;
 			}
 			FB_BOOLEAN ret = static_cast<VTable*>(this->cloopVTable)->trace_trigger_compile(this, connection, trigger, time_millis, trig_result);
 			return ret;
@@ -14394,6 +14424,8 @@ namespace Firebird
 				{
 					this->version = Base::VERSION;
 					this->callback = &Name::cloopcallbackDispatcher;
+					this->afterAttach = &Name::cloopafterAttachDispatcher;
+					this->dispose = &Name::cloopdisposeDispatcher;
 				}
 			} vTable;
 
@@ -14412,6 +14444,33 @@ namespace Firebird
 				return static_cast<unsigned>(0);
 			}
 		}
+
+		static unsigned CLOOP_CARG cloopafterAttachDispatcher(ICryptKeyCallback* self, IStatus* status, const char* dbName, const IStatus* attStatus) CLOOP_NOEXCEPT
+		{
+			StatusType status2(status);
+
+			try
+			{
+				return static_cast<Name*>(self)->Name::afterAttach(&status2, dbName, attStatus);
+			}
+			catch (...)
+			{
+				StatusType::catchException(&status2);
+				return static_cast<unsigned>(0);
+			}
+		}
+
+		static void CLOOP_CARG cloopdisposeDispatcher(ICryptKeyCallback* self) CLOOP_NOEXCEPT
+		{
+			try
+			{
+				static_cast<Name*>(self)->Name::dispose();
+			}
+			catch (...)
+			{
+				StatusType::catchException(0);
+			}
+		}
 	};
 
 	template <typename Name, typename StatusType, typename Base = IVersionedImpl<Name, StatusType, Inherit<ICryptKeyCallback> > >
@@ -14428,6 +14487,13 @@ namespace Firebird
 		}
 
 		virtual unsigned callback(unsigned dataLength, const void* data, unsigned bufferLength, void* buffer) = 0;
+		virtual unsigned afterAttach(StatusType* status, const char* dbName, const IStatus* attStatus)
+		{
+			return 0;
+		}
+		virtual void dispose()
+		{
+		}
 	};
 
 	template <typename Name, typename StatusType, typename Base>

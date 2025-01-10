@@ -176,8 +176,10 @@ bool IndexTableScan::internalGetRecord(thread_db* tdbb) const
 			FB_NEW_POOL(*tdbb->getDefaultPool()) IndexScanListIterator(tdbb, m_index->retrieval) :
 			nullptr;
 
+		USHORT dummy = 0;		// exclude upper/lower bits are not used here,
+								// i.e. additional forced include not needed
 		if (!BTR_make_bounds(tdbb, m_index->retrieval, impure->irsb_iterator,
-							 impure->irsb_nav_lower, impure->irsb_nav_upper))
+							 impure->irsb_nav_lower, impure->irsb_nav_upper, dummy))
 		{
 			rpb->rpb_number.setValid(false);
 			return false;
@@ -261,7 +263,7 @@ bool IndexTableScan::internalGetRecord(thread_db* tdbb) const
 				const auto nextLower = impure->irsb_nav_current_lower;
 				const auto nextUpper = impure->irsb_nav_current_upper;
 
-				if (impure->irsb_iterator && impure->irsb_iterator->getNext(nextLower, nextUpper))
+				if (impure->irsb_iterator && impure->irsb_iterator->getNext(tdbb, nextLower, nextUpper))
 				{
 					if (retrieval->irb_generic & irb_root_list_scan)
 					{
@@ -352,44 +354,45 @@ bool IndexTableScan::internalGetRecord(thread_db* tdbb) const
 	return false;
 }
 
-void IndexTableScan::getChildren(Array<const RecordSource*>& children) const
+void IndexTableScan::getLegacyPlan(thread_db* tdbb, string& plan, unsigned level) const
 {
+	if (!level)
+		plan += "(";
+
+	plan += printName(tdbb, m_alias, false) + " ORDER ";
+	string index;
+	printLegacyInversion(tdbb, m_index, index);
+	plan += index;
+
+	if (m_inversion)
+	{
+		plan += " INDEX (";
+		string indices;
+		printLegacyInversion(tdbb, m_inversion, indices);
+		plan += indices + ")";
+	}
+
+	if (!level)
+		plan += ")";
 }
 
-void IndexTableScan::print(thread_db* tdbb, string& plan, bool detailed, unsigned level, bool recurse) const
+void IndexTableScan::internalGetPlan(thread_db* tdbb, PlanEntry& planEntry, unsigned level, bool recurse) const
 {
-	if (detailed)
-	{
-		plan += printIndent(++level) + "Table " +
-			printName(tdbb, m_relation->rel_name.c_str(), m_alias) + " Access By ID";
+	planEntry.className = "IndexTableScan";
 
-		printOptInfo(plan);
-		printInversion(tdbb, m_index, plan, true, level, true);
+	planEntry.lines.add().text = "Table " + printName(tdbb, m_relation->rel_name.c_str(), m_alias) + " Access By ID";
+	printOptInfo(planEntry.lines);
 
-		if (m_inversion)
-			printInversion(tdbb, m_inversion, plan, true, ++level);
-	}
-	else
-	{
-		if (!level)
-			plan += "(";
+	printInversion(tdbb, m_index, planEntry.lines, true, 1, true);
 
-		plan += printName(tdbb, m_alias, false) + " ORDER ";
-		string index;
-		printInversion(tdbb, m_index, index, false, level);
-		plan += index;
+	planEntry.objectType = m_relation->getObjectType();
+	planEntry.objectName = m_relation->rel_name;
 
-		if (m_inversion)
-		{
-			plan += " INDEX (";
-			string indices;
-			printInversion(tdbb, m_inversion, indices, false, level);
-			plan += indices + ")";
-		}
+	if (m_alias.hasData() && m_relation->rel_name != m_alias)
+		planEntry.alias = m_alias;
 
-		if (!level)
-			plan += ")";
-	}
+	if (m_inversion)
+		printInversion(tdbb, m_inversion, planEntry.lines, true, 2, false);
 }
 
 int IndexTableScan::compareKeys(const index_desc* idx,
