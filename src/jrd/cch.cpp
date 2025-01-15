@@ -590,8 +590,6 @@ bool CCH_exclusive_attachment(thread_db* tdbb, USHORT level, SSHORT wait_flag, S
 	{
 		try
 		{
-			tdbb->checkCancelState();
-
 			bool found = false;
 			for (Jrd::Attachment* other_attachment = attachment->att_next; other_attachment;
 				 other_attachment = other_attachment->att_next)
@@ -637,11 +635,12 @@ bool CCH_exclusive_attachment(thread_db* tdbb, USHORT level, SSHORT wait_flag, S
 				return true;
 			}
 
-			// Our thread needs to sleep for CCH_EXCLUSIVE_RETRY_INTERVAL seconds.
+			// Our thread needs to sleep for CCH_EXCLUSIVE_RETRY_INTERVAL milliseconds.
 
 			if (remaining >= CCH_EXCLUSIVE_RETRY_INTERVAL)
 			{
 				SyncUnlockGuard unlock(exLock ? (*exGuard) : dsGuard);
+				tdbb->reschedule();
 				Thread::sleep(CCH_EXCLUSIVE_RETRY_INTERVAL);
 			}
 
@@ -1279,7 +1278,7 @@ void CCH_flush(thread_db* tdbb, USHORT flush_flag, TraNumber tra_number)
 			PIO_flush(tdbb, shadow->sdw_file);
 
 		BackupManager* bm = dbb->dbb_backup_manager;
-		if (!bm->isShutDown())
+		if (bm && !bm->isShutDown())
 		{
 			BackupManager::StateReadGuard stateGuard(tdbb);
 			const int backup_state = bm->getState();
@@ -2486,19 +2485,9 @@ bool CCH_write_all_shadows(thread_db* tdbb, Shadow* shadow, BufferDesc* bdb, Ods
 			const UCHAR* q = (UCHAR *) pageSpaceID->file->fil_string;
 			header->hdr_data[0] = HDR_end;
 			header->hdr_end = HDR_SIZE;
-			header->hdr_next_page = 0;
 
 			PAG_add_header_entry(tdbb, header, HDR_root_file_name,
 								 (USHORT) strlen((const char*) q), q);
-
-			jrd_file* next_file = shadow_file->fil_next;
-			if (next_file)
-			{
-				q = (UCHAR *) next_file->fil_string;
-				const SLONG last = next_file->fil_min_page - 1;
-				PAG_add_header_entry(tdbb, header, HDR_file, (USHORT) strlen((const char*) q), q);
-				PAG_add_header_entry(tdbb, header, HDR_last_page, sizeof(last), (const UCHAR*) &last);
-			}
 
 			header->hdr_flags |= hdr_active_shadow;
 			header->hdr_header.pag_pageno = bdb->bdb_page.getPageNum();

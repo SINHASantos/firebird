@@ -189,23 +189,46 @@ void InnerJoin::estimateCost(unsigned position,
 	joinedStreams[position].selectivity = candidate->selectivity;
 
 	// Get the stream cardinality
-	const auto tail = &csb->csb_rpt[stream->number];
-	const auto streamCardinality = tail->csb_cardinality;
+	const auto streamCardinality = csb->csb_rpt[stream->number].csb_cardinality;
+
+	// If the table looks like empty during preparation time, we cannot be sure about
+	// its real cardinality during execution. So, unless we have some index-based
+	// filtering applied, let's better be pessimistic and avoid hash joining due to
+	// likely cardinality under-estimation.
+	const bool avoidHashJoin = (streamCardinality <= MINIMUM_CARDINALITY && !stream->baseIndexes);
+
+	auto currentCardinality = candidate->unique ?
+		MINIMUM_CARDINALITY : streamCardinality * candidate->selectivity;
+	auto currentCost = candidate->cost;
+
+	// Given the "first-rows" mode specified (or implied)
+	// and unless an external sort is to be applied afterwards,
+	// fake the expected cardinality to look as low as possible
+	// to estimate the cost just for a single row being produced
+
+	if ((!sort || candidate->navigated) && optimizer->favorFirstRows())
+		currentCardinality = MINIMUM_CARDINALITY;
 
 	// Calculate the nested loop cost, it's our default option
-	const auto loopCost = candidate->cost * cardinality;
+	const auto loopCost = currentCost * cardinality;
 	cost = loopCost;
 
-	if (position)
+	// Consider whether the current stream can be hash-joined to the prior ones.
+	// Beware conditional retrievals, this is impossible for them.
+
+	if (position && !candidate->condition && !avoidHashJoin)
 	{
 		// Calculate the hashing cost. It consists of the following parts:
 		//  - hashed stream retrieval
-		//  - copying rows into the hash table
+		//  - copying rows into the hash table (including hash calculation)
 		//  - probing the hash table and copying the matched rows
 
 		const auto hashCardinality = stream->baseSelectivity * streamCardinality;
-		const auto hashCost = stream->baseCost + hashCardinality +
-			cardinality * (1.0 + candidate->selectivity * streamCardinality);
+		const auto hashCost = stream->baseCost +
+			// hashing cost
+			hashCardinality * (COST_FACTOR_MEMCOPY + COST_FACTOR_HASHING) +
+			// probing + copying cost
+			cardinality * (COST_FACTOR_HASHING + currentCardinality * COST_FACTOR_MEMCOPY);
 
 		if (hashCost <= loopCost && hashCardinality <= HashJoin::maxCapacity())
 		{
@@ -215,6 +238,13 @@ void InnerJoin::estimateCost(unsigned position,
 			// Scan the matches for possible equi-join conditions
 			for (const auto match : candidate->matches)
 			{
+				if (!match->containsStream(stream->number))
+				{
+					// This should never happen but be prepared for the worst
+					fb_assert(false);
+					continue;
+				}
+
 				// Check whether we have an equivalence operation
 				if (!optimizer->checkEquiJoin(match))
 					continue;
@@ -238,8 +268,7 @@ void InnerJoin::estimateCost(unsigned position,
 		}
 	}
 
-	const auto resultingCardinality = streamCardinality * candidate->selectivity;
-	cardinality = MAX(resultingCardinality, MINIMUM_CARDINALITY);
+	cardinality = MAX(currentCardinality, MINIMUM_CARDINALITY);
 }
 
 
@@ -260,23 +289,11 @@ bool InnerJoin::findJoinOrder()
 	printStartOrder();
 #endif
 
-	int filters = 0, navigations = 0;
-
 	for (const auto innerStream : innerStreams)
 	{
 		if (!innerStream->used)
 		{
 			remainingStreams++;
-
-			const int currentFilter = innerStream->isFiltered() ? 1 : 0;
-
-			if (navigations && currentFilter)
-				navigations = 0;
-
-			filters += currentFilter;
-
-			if (innerStream->baseNavigated && currentFilter == filters)
-				navigations++;
 
 			if (innerStream->isIndependent())
 			{
@@ -299,24 +316,11 @@ bool InnerJoin::findJoinOrder()
 		{
 			if (!innerStream->used)
 			{
-				// If optimization for first rows has been requested and index navigations are
-				// possible, then consider only join orders starting with a navigational stream.
-				// Except cases when other streams have local predicates applied.
+				indexedRelationships.clear();
+				findBestOrder(0, innerStream, indexedRelationships, 0.0, 1.0);
 
-				const int currentFilter = innerStream->isFiltered() ? 1 : 0;
-
-				if (!optimizer->favorFirstRows() || !navigations ||
-					(innerStream->baseNavigated && currentFilter == filters))
-				{
-					indexedRelationships.clear();
-					findBestOrder(0, innerStream, indexedRelationships, 0.0, 1.0);
-
-					if (plan)
-					{
-						// If a explicit PLAN was specified we should be ready;
-						break;
-					}
-				}
+				if (plan) // if an explicit PLAN was specified we should be ready
+					break;
 			}
 		}
 	}
@@ -623,9 +627,9 @@ River* InnerJoin::formRiver()
 void InnerJoin::getIndexedRelationships(StreamInfo* testStream)
 {
 #ifdef OPT_DEBUG_RETRIEVAL
-	const auto name = optimizer->getStreamName(testStream->stream);
+	const auto name = optimizer->getStreamName(testStream->number);
 	optimizer->printf("Dependencies for stream %u (%s):\n",
-					  testStream->stream, name.c_str());
+					  testStream->number, name.c_str());
 #endif
 
 	const auto tail = &csb->csb_rpt[testStream->number];
@@ -697,7 +701,7 @@ InnerJoin::StreamInfo* InnerJoin::getStreamInfo(StreamType stream)
 // Dump finally selected stream order
 void InnerJoin::printBestOrder() const
 {
-	if (bestStreams.isEmpty())
+	if (bestStreams.getCount() < 2)
 		return;
 
 	optimizer->printf("  best order, streams:");
@@ -752,7 +756,7 @@ void InnerJoin::printFoundOrder(StreamType position,
 // Dump finally selected stream order
 void InnerJoin::printStartOrder() const
 {
-	optimizer->printf("Start join order, streams:");
+	bool found = false;
 
 	const auto end = innerStreams.end();
 	for (auto iter = innerStreams.begin(); iter != end; iter++)
@@ -760,6 +764,12 @@ void InnerJoin::printStartOrder() const
 		const auto innerStream = *iter;
 		if (!innerStream->used)
 		{
+			if (!found)
+			{
+				optimizer->printf("Start join order, streams:");
+				found = true;
+			}
+
 			const auto name = optimizer->getStreamName(innerStream->number);
 			optimizer->printf(" %u (%s) base cost (%1.2f)",
 							  innerStream->number, name.c_str(), innerStream->baseCost);

@@ -42,6 +42,7 @@
 #include "../common/classes/stack.h"
 #include "../common/classes/timestamp.h"
 #include "../common/classes/TimerImpl.h"
+#include "../common/classes/TriState.h"
 #include "../common/ThreadStart.h"
 #include "../common/TimeZoneUtil.h"
 
@@ -59,6 +60,10 @@ namespace EDS {
 namespace Replication
 {
 	class TableMatcher;
+}
+
+namespace Firebird {
+	class TextType;
 }
 
 class CharSetContainer;
@@ -83,7 +88,6 @@ namespace Jrd
 	class ArrayField;
 	struct sort_context;
 	class vcl;
-	class TextType;
 	class Parameter;
 	class jrd_fld;
 	class dsql_dbb;
@@ -307,7 +311,7 @@ public:
 		: att(handle), jAtt(NULL), shutError(0)
 	{ }
 
-	Attachment* getHandle() throw()
+	Attachment* getHandle() noexcept
 	{
 		return att;
 	}
@@ -639,6 +643,7 @@ public:
 	USHORT att_original_timezone;
 	USHORT att_current_timezone;
 	int att_parallel_workers;
+	Firebird::TriState att_opt_first_rows;
 
 	PageToBufferMap* att_bdb_cache;			// managed in CCH, created in att_pool, freed with it
 
@@ -661,6 +666,7 @@ public:
 
 	Firebird::Array<Statement*>	att_internal;			// internal statements
 	Firebird::Array<Statement*>	att_dyn_req;			// internal dyn statements
+	Firebird::Array<Statement*>	att_internal_cached_statements;		// internal cached statements
 	Firebird::ICryptKeyCallback*	att_crypt_callback;		// callback for DB crypt
 	Firebird::DecimalStatus			att_dec_status;			// error handling and rounding
 
@@ -728,13 +734,14 @@ public:
 	void storeBinaryBlob(thread_db* tdbb, jrd_tra* transaction, bid* blobId,
 		const Firebird::ByteChunk& chunk);
 
+	void releaseBatches();
 	void releaseGTTs(thread_db* tdbb);
 	void resetSession(thread_db* tdbb, jrd_tra** traHandle);
 
 	void signalCancel();
 	void signalShutdown(ISC_STATUS code);
 
-	void mergeStats();
+	void mergeStats(bool pageStatsOnly = false);
 	bool hasActiveRequests() const;
 
 	bool backupStateWriteLock(thread_db* tdbb, SSHORT wait);
@@ -742,17 +749,17 @@ public:
 	bool backupStateReadLock(thread_db* tdbb, SSHORT wait);
 	void backupStateReadUnLock(thread_db* tdbb);
 
-	StableAttachmentPart* getStable() throw()
+	StableAttachmentPart* getStable() noexcept
 	{
 		return att_stable;
 	}
 
-	void setStable(StableAttachmentPart *js) throw()
+	void setStable(StableAttachmentPart *js) noexcept
 	{
 		att_stable = js;
 	}
 
-	JAttachment* getInterface() throw();
+	JAttachment* getInterface() noexcept;
 
 	unsigned int getIdleTimeout() const
 	{
@@ -790,12 +797,12 @@ public:
 	}
 
 	// batches control
-	void registerBatch(JBatch* b)
+	void registerBatch(DsqlBatch* b)
 	{
 		att_batches.add(b);
 	}
 
-	void deregisterBatch(JBatch* b)
+	void deregisterBatch(DsqlBatch* b)
 	{
 		att_batches.findAndRemove(b);
 	}
@@ -842,7 +849,7 @@ public:
 	ProfilerManager* getProfilerManager(thread_db* tdbb);
 	ProfilerManager* getActiveProfilerManagerForNonInternalStatement(thread_db* tdbb);
 	bool isProfilerActive();
-	void releaseProfilerManager();
+	void releaseProfilerManager(thread_db* tdbb);
 
 	JProvider* getProvider()
 	{
@@ -858,7 +865,7 @@ private:
 	unsigned int att_stmt_timeout;		// milliseconds
 	Firebird::RefPtr<Firebird::TimerImpl> att_idle_timer;
 
-	Firebird::Array<JBatch*> att_batches;
+	Firebird::Array<DsqlBatch*> att_batches;
 	InitialOptions att_initial_options;	// Initial session options
 	DebugOptions att_debug_options;
 	Firebird::AutoPtr<ProfilerManager> att_profiler_manager;	// ProfilerManager

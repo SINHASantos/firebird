@@ -198,6 +198,7 @@ public:
 		tra_user_management(NULL),
 		tra_sec_db_context(NULL),
 		tra_mapping_list(NULL),
+		tra_dbcreators_list(nullptr),
 		tra_autonomous_pool(NULL),
 		tra_autonomous_cnt(0)
 	{
@@ -364,15 +365,16 @@ public:
 			Record* const record = *iter;
 			fb_assert(record);
 
-			if (!record->testFlags(REC_undo_active))
+			if (!record->isTempActive())
 			{
 				// initialize record for reuse
-				record->reset(format, REC_undo_active);
+				record->reset(format);
+				record->setTempActive();
 				return record;
 			}
 		}
 
-		Record* const record = FB_NEW_POOL(*tra_pool) Record(*tra_pool, format, REC_undo_active);
+		Record* const record = FB_NEW_POOL(*tra_pool) Record(*tra_pool, format, true);
 		tra_undo_records.add(record);
 
 		return record;
@@ -432,10 +434,12 @@ const ULONG TRA_own_interface		= 0x20000L;		// tra_interface was created for int
 const ULONG TRA_read_consistency	= 0x40000L; 	// ensure read consistency in this transaction
 const ULONG TRA_ex_restart			= 0x80000L; 	// Exception was raised to restart request
 const ULONG TRA_replicating			= 0x100000L;	// transaction is allowed to be replicated
+const ULONG TRA_no_blob_check		= 0x200000L;	// disable blob access checking
+const ULONG TRA_auto_release_temp_blobid	= 0x400000L;	// remove temp ids of materialized user blobs from tra_blobs
 
 // flags derived from TPB, see also transaction_options() at tra.cpp
 const ULONG TRA_OPTIONS_MASK = (TRA_degree3 | TRA_readonly | TRA_ignore_limbo | TRA_read_committed |
-	TRA_autocommit | TRA_rec_version | TRA_read_consistency | TRA_no_auto_undo | TRA_restart_requests);
+	TRA_autocommit | TRA_rec_version | TRA_read_consistency | TRA_no_auto_undo | TRA_restart_requests | TRA_auto_release_temp_blobid);
 
 const int TRA_MASK				= 3;
 //const int TRA_BITS_PER_TRANS	= 2;
@@ -474,7 +478,6 @@ enum dfw_t {
 	dfw_create_index,
 	dfw_delete_index,
 	dfw_compute_security,
-	dfw_add_file,
 	dfw_add_shadow,
 	dfw_delete_shadow,
 	dfw_delete_shadow_nodelete,

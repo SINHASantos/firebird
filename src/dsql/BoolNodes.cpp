@@ -30,6 +30,7 @@
 #include "../jrd/recsrc/Cursor.h"
 #include "../jrd/optimizer/Optimizer.h"
 #include "../jrd/blb_proto.h"
+#include "../jrd/btr_proto.h"
 #include "../jrd/cmp_proto.h"
 #include "../jrd/evl_proto.h"
 #include "../jrd/intl_proto.h"
@@ -46,12 +47,86 @@
 using namespace Firebird;
 using namespace Jrd;
 
-namespace Jrd {
+namespace
+{
+	// Maximum members in "IN" list. For eg. SELECT * FROM T WHERE F IN (1, 2, 3, ...)
+	// Beware: raising the limit beyond the 16-bit boundaries would be an incompatible BLR change.
+	static const unsigned MAX_MEMBER_LIST = MAX_USHORT;
 
+	// Compare two comparisons with the boolean literal of the form:
+	//   [NOT] <value> [{ = | <> } { TRUE | FALSE }]
+	// and detect whether they're logically the same.
+	// For example: (NOT A) == (A = FALSE) == (A <> TRUE) == NOT (A = TRUE) etc.
 
-// Maximum members in "IN" list. For eg. SELECT * FROM T WHERE F IN (1, 2, 3, ...)
-// Beware: raising the limit beyond the 16-bit boundaries would be an incompatible BLR change.
-static const unsigned MAX_MEMBER_LIST = MAX_USHORT;
+	bool sameBoolComparison(const ComparativeBoolNode* node1, const ComparativeBoolNode* node2, bool ignoreStreams)
+	{
+		fb_assert(node1 && node2);
+
+		if (node1->blrOp != blr_eql && node1->blrOp != blr_neq)
+			return false;
+
+		if (node2->blrOp != blr_eql && node2->blrOp != blr_neq)
+			return false;
+
+		bool isTrue1 = false;
+		const ValueExprNode* arg1 = nullptr;
+
+		if (const auto literal = nodeAs<LiteralNode>(node1->arg1))
+		{
+			if (literal->litDesc.isBoolean())
+			{
+				isTrue1 = literal->getBoolean();
+				arg1 = node1->arg2;
+			}
+		}
+		else if (const auto literal = nodeAs<LiteralNode>(node1->arg2))
+		{
+			if (literal->litDesc.isBoolean())
+			{
+				isTrue1 = literal->getBoolean();
+				arg1 = node1->arg1;
+			}
+		}
+
+		if (!arg1)
+			return false;
+
+		if (node1->blrOp == blr_neq)
+			isTrue1 = !isTrue1;
+
+		bool isTrue2 = false;
+		const ValueExprNode* arg2 = nullptr;
+
+		if (const auto literal = nodeAs<LiteralNode>(node2->arg1))
+		{
+			if (literal->litDesc.isBoolean())
+			{
+				isTrue2 = literal->getBoolean();
+				arg2 = node2->arg2;
+			}
+		}
+		else if (const auto literal = nodeAs<LiteralNode>(node2->arg2))
+		{
+			if (literal->litDesc.isBoolean())
+			{
+				isTrue2 = literal->getBoolean();
+				arg2 = node2->arg1;
+			}
+		}
+
+		if (!arg2)
+			return false;
+
+		if (node2->blrOp == blr_neq)
+			isTrue2 = !isTrue2;
+
+		if (!arg1->sameAs(arg2, ignoreStreams) || isTrue1 != isTrue2)
+			return false;
+
+		return true;
+	}
+
+} // namespace
 
 
 //--------------------
@@ -509,7 +584,13 @@ bool ComparativeBoolNode::sameAs(const ExprNode* other, bool ignoreStreams) cons
 {
 	const ComparativeBoolNode* const otherNode = nodeAs<ComparativeBoolNode>(other);
 
-	if (!otherNode || blrOp != otherNode->blrOp)
+	if (!otherNode)
+		return false;
+
+	if (sameBoolComparison(this, otherNode, ignoreStreams))
+		return true;
+
+	if (blrOp != otherNode->blrOp)
 		return false;
 
 	bool matching = arg1->sameAs(otherNode->arg1, ignoreStreams) &&
@@ -663,7 +744,9 @@ bool ComparativeBoolNode::execute(thread_db* tdbb, Request* request) const
 
 	desc[0] = EVL_expr(tdbb, request, arg1);
 
-	const ULONG flags = request->req_flags;
+	// arg1 IS NULL
+	const bool null1 = (request->req_flags & req_null);
+
 	request->req_flags &= ~req_null;
 	bool force_equal = (request->req_flags & req_same_tx_upd) != 0;
 
@@ -728,19 +811,22 @@ bool ComparativeBoolNode::execute(thread_db* tdbb, Request* request) const
 	else
 		desc[1] = EVL_expr(tdbb, request, arg2);
 
+	// arg2 IS NULL
+	const bool null2 = (request->req_flags & req_null);
+
 	// An equivalence operator evaluates to true when both operands
 	// are NULL and behaves like an equality operator otherwise.
 	// Note that this operator never sets req_null flag
 
 	if (blrOp == blr_equiv)
 	{
-		if ((flags & req_null) && (request->req_flags & req_null))
+		if (null1 && null2)
 		{
 			request->req_flags &= ~req_null;
 			return true;
 		}
 
-		if ((flags & req_null) || (request->req_flags & req_null))
+		if (null1 || null2)
 		{
 			request->req_flags &= ~req_null;
 			return false;
@@ -748,13 +834,15 @@ bool ComparativeBoolNode::execute(thread_db* tdbb, Request* request) const
 	}
 
 	// If either of expressions above returned NULL set req_null flag
-	// and return false
+	// and return false. The exception is BETWEEN operator that could
+	// return FALSE even when arg2 IS NULL, for example:
+	//   1 BETWEEN NULL AND 0
 
-	if (flags & req_null)
+	if (null1 || (null2 && (blrOp != blr_between)))
+	{
 		request->req_flags |= req_null;
-
-	if (request->req_flags & req_null)
 		return false;
+	}
 
 	force_equal |= (request->req_flags & req_same_tx_upd) != 0;
 	int comparison; // while the two switch() below are in sync, no need to initialize
@@ -768,8 +856,19 @@ bool ComparativeBoolNode::execute(thread_db* tdbb, Request* request) const
 		case blr_lss:
 		case blr_leq:
 		case blr_neq:
-		case blr_between:
 			comparison = MOV_compare(tdbb, desc[0], desc[1]);
+			break;
+
+		case blr_between:
+			if (!null2)
+			{
+				comparison = MOV_compare(tdbb, desc[0], desc[1]);
+				if (comparison < 0)
+					return false;
+			}
+			else
+				comparison = -1;
+			break;
 	}
 
 	// If we are checking equality of record_version
@@ -806,8 +905,22 @@ bool ComparativeBoolNode::execute(thread_db* tdbb, Request* request) const
 		case blr_between:
 			desc[1] = EVL_expr(tdbb, request, arg3);
 			if (request->req_flags & req_null)
+			{
+				if (!null2 && comparison < 0)
+					request->req_flags &= ~req_null;
 				return false;
-			return comparison >= 0 && MOV_compare(tdbb, desc[0], desc[1]) <= 0;
+			}
+			{
+				// arg1 <= arg3
+				const bool cmp1_3 = (MOV_compare(tdbb, desc[0], desc[1]) <= 0);
+				if (null2)
+				{
+					if (cmp1_3)
+						request->req_flags |= req_null;
+					return false;
+				}
+				return cmp1_3;
+			}
 
 		case blr_containing:
 		case blr_starting:
@@ -1124,7 +1237,7 @@ BoolExprNode* ComparativeBoolNode::createRseNode(DsqlCompilerScratch* dsqlScratc
 	const DsqlContextStack::iterator baseDT(dsqlScratch->derivedContext);
 	const DsqlContextStack::iterator baseUnion(dsqlScratch->unionContext);
 
-	RseNode* rse = PASS1_rse(dsqlScratch, select_expr, false, false);
+	RseNode* rse = PASS1_rse(dsqlScratch, select_expr);
 	rse->flags |= RseNode::FLAG_DSQL_COMPARATIVE;
 
 	// Create a conjunct to be injected.
@@ -1191,6 +1304,15 @@ BoolExprNode* InListBoolNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
 	const auto node = FB_NEW_POOL(dsqlScratch->getPool())
 		InListBoolNode(dsqlScratch->getPool(), procArg, procList);
 
+	// Try to force arg to be same type as list eg: ? = (FIELD, ...) case
+	for (auto item : procList->items)
+		PASS1_set_parameter_type(dsqlScratch, node->arg, item, false);
+
+	// Try to force list to be same type as arg eg: FIELD = (?, ...) case
+	for (auto item : procList->items)
+		PASS1_set_parameter_type(dsqlScratch, item, node->arg, false);
+
+	// Derive a common data type for the list items
 	dsc argDesc;
 	DsqlDescMaker::fromNode(dsqlScratch, &argDesc, procArg);
 
@@ -1221,6 +1343,7 @@ BoolExprNode* InListBoolNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
 		listDesc = commonDesc;
 	}
 
+	// Cast to the common data type where necessary
 	for (auto& item : procList->items)
 	{
 		const auto desc = item->getDsqlDesc();
@@ -1245,17 +1368,9 @@ BoolExprNode* InListBoolNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
 
 			const auto castNode = FB_NEW_POOL(dsqlScratch->getPool())
 				CastNode(dsqlScratch->getPool(), item, field);
-			item = castNode->dsqlPass(dsqlScratch);
+			item = castNode;
 		}
 	}
-
-	// Try to force arg to be same type as list eg: ? = (FIELD, ...) case
-	for (auto item : procList->items)
-		PASS1_set_parameter_type(dsqlScratch, node->arg, item, false);
-
-	// Try to force list to be same type as arg eg: FIELD = (?, ...) case
-	for (auto item : procList->items)
-		PASS1_set_parameter_type(dsqlScratch, item, node->arg, false);
 
 	return node;
 }
@@ -1355,16 +1470,30 @@ void InListBoolNode::pass2Boolean(thread_db* tdbb, CompilerScratch* csb, std::fu
 			ERR_post(Arg::Gds(isc_bad_dbkey));
 	}
 
-	dsc descriptor_a, descriptor_b;
-	arg->getDesc(tdbb, csb, &descriptor_a);
-	list->getDesc(tdbb, csb, &descriptor_b);
+	dsc argDesc, listDesc;
+	arg->getDesc(tdbb, csb, &argDesc);
+	list->getDesc(tdbb, csb, &listDesc);
 
-	if (DTYPE_IS_DATE(descriptor_a.dsc_dtype))
+	if (argDesc.isDateTime())
 		arg->nodFlags |= FLAG_DATE;
-	else if (DTYPE_IS_DATE(descriptor_b.dsc_dtype))
+	else if (listDesc.isDateTime())
 	{
 		for (auto item : list->items)
 			item->nodFlags |= FLAG_DATE;
+	}
+
+	// If lookup in the list is to be performed against the generic comparison rules,
+	// add an extra cast to make things working properly
+	if (!BTR_types_comparable(listDesc, argDesc))
+	{
+		for (auto& item : list->items)
+		{
+			const auto castNode = FB_NEW_POOL(csb->csb_pool) CastNode(csb->csb_pool);
+			castNode->castDesc = argDesc;
+			castNode->source = item;
+			castNode->impureOffset = csb->allocImpure<impure_value>();
+			item = castNode;
+		}
 	}
 
 	if (nodFlags & FLAG_INVARIANT)
@@ -1377,29 +1506,42 @@ bool InListBoolNode::execute(thread_db* tdbb, Request* request) const
 {
 	if (const auto argDesc = EVL_expr(tdbb, request, arg))
 	{
+		bool anyMatch = false, anyNull = false;
+
 		if (nodFlags & FLAG_INVARIANT)
 		{
-			const auto res = lookup->find(tdbb, request, arg, argDesc);
-
-			if (res.isAssigned())
-				return res.value;
-
-			fb_assert(list->items.hasData());
-			request->req_flags |= req_null;
-			return false;
+			anyMatch = lookup->find(tdbb, request, arg, argDesc);
+			anyNull = (request->req_flags & req_null);
 		}
-
-		for (const auto value : list->items)
+		else
 		{
-			if (const auto valueDesc = EVL_expr(tdbb, request, value))
+			for (const auto value : list->items)
 			{
-				if (!MOV_compare(tdbb, argDesc, valueDesc))
-					return true;
+				if (const auto valueDesc = EVL_expr(tdbb, request, value))
+				{
+					if (!MOV_compare(tdbb, argDesc, valueDesc))
+					{
+						anyMatch = true;
+						break;
+					}
+				}
+				else
+				{
+					anyNull = true;
+				}
 			}
 		}
+
+		request->req_flags &= ~req_null;
+
+		if (anyMatch)
+			return true;
+
+		if (anyNull)
+			request->req_flags |= req_null;
 	}
 
-	return false;
+	return false; // for argDesc == nullptr, req_null is already set by EVL_expr()
 }
 
 
@@ -1588,14 +1730,50 @@ BoolExprNode* NotBoolNode::process(DsqlCompilerScratch* dsqlScratch, bool invert
 	if (!invert)
 		return arg->dsqlPass(dsqlScratch);
 
-	ComparativeBoolNode* cmpArg = nodeAs<ComparativeBoolNode>(arg);
-	BinaryBoolNode* binArg = nodeAs<BinaryBoolNode>(arg);
+	const auto cmpArg = nodeAs<ComparativeBoolNode>(arg);
+	const auto binArg = nodeAs<BinaryBoolNode>(arg);
 
 	// Do not handle special case: <value> NOT IN <list>
 
 	if (cmpArg && (!cmpArg->dsqlSpecialArg || !nodeIs<ValueListNode>(cmpArg->dsqlSpecialArg)))
 	{
-		// Invert the given boolean.
+		// Invert the given boolean
+
+		// For (A = TRUE/FALSE), invert only the boolean value, not the condition itself
+
+		if (cmpArg->blrOp == blr_eql)
+		{
+			auto newArg1 = cmpArg->arg1;
+			auto newArg2 = cmpArg->arg2;
+
+			if (const auto literal = nodeAs<LiteralNode>(cmpArg->arg1))
+			{
+				if (literal->litDesc.isBoolean())
+				{
+					const auto invertedVal = literal->getBoolean() ? "" : "1";
+					newArg1 = MAKE_constant(invertedVal, CONSTANT_BOOLEAN);
+				}
+			}
+			else if (const auto literal = nodeAs<LiteralNode>(cmpArg->arg2))
+			{
+				if (literal->litDesc.isBoolean())
+				{
+					const auto invertedVal = literal->getBoolean() ? "" : "1";
+					newArg2 = MAKE_constant(invertedVal, CONSTANT_BOOLEAN);
+				}
+			}
+
+			if (cmpArg->arg1 != newArg1 || cmpArg->arg2 != newArg2)
+			{
+				ComparativeBoolNode* node = FB_NEW_POOL(pool) ComparativeBoolNode(
+					pool, cmpArg->blrOp, newArg1, newArg2);
+				node->dsqlSpecialArg = cmpArg->dsqlSpecialArg;
+				node->dsqlCheckBoolean = cmpArg->dsqlCheckBoolean;
+
+				return node->dsqlPass(dsqlScratch);
+			}
+		}
+
 		switch (cmpArg->blrOp)
 		{
 			case blr_eql:
@@ -1709,7 +1887,7 @@ DmlNode* RseBoolNode::parse(thread_db* tdbb, MemoryPool& pool, CompilerScratch* 
 	node->rse->flags |= RseNode::FLAG_SUB_QUERY;
 
 	if (blrOp == blr_any || blrOp == blr_exists) // maybe for blr_unique as well?
-		node->rse->flags |= RseNode::FLAG_OPT_FIRST_ROWS;
+		node->rse->firstRows = true;
 
 	if (csb->csb_currentForNode && csb->csb_currentForNode->parBlrBeginCnt <= 1)
 		node->ownSavepoint = false;
@@ -1744,7 +1922,7 @@ BoolExprNode* RseBoolNode::dsqlPass(DsqlCompilerScratch* dsqlScratch)
 	const DsqlContextStack::iterator base(*dsqlScratch->context);
 
 	RseBoolNode* node = FB_NEW_POOL(dsqlScratch->getPool()) RseBoolNode(dsqlScratch->getPool(), blrOp,
-		PASS1_rse(dsqlScratch, nodeAs<SelectExprNode>(dsqlRse), false, false));
+		PASS1_rse(dsqlScratch, nodeAs<SelectExprNode>(dsqlRse)));
 
 	// Finish off by cleaning up contexts
 	dsqlScratch->context->clear(base);
@@ -1998,16 +2176,20 @@ BoolExprNode* RseBoolNode::convertNeqAllToNotAny(thread_db* tdbb, CompilerScratc
 
 	andNode->arg1 = missNode;
 
+	RseNode* newInnerRse1 = innerRse->clone(csb->csb_pool);
+	newInnerRse1->flags |= RseNode::FLAG_SUB_QUERY;
+
 	RseBoolNode* rseBoolNode = FB_NEW_POOL(csb->csb_pool) RseBoolNode(csb->csb_pool, blr_any);
-	rseBoolNode->rse = innerRse;
+	rseBoolNode->rse = newInnerRse1;
 	rseBoolNode->ownSavepoint = this->ownSavepoint;
 
 	andNode->arg2 = rseBoolNode;
 
-	RseNode* newInnerRse = innerRse->clone(csb->csb_pool);
+	RseNode* newInnerRse2 = innerRse->clone(csb->csb_pool);
+	newInnerRse2->flags |= RseNode::FLAG_SUB_QUERY;
 
 	rseBoolNode = FB_NEW_POOL(csb->csb_pool) RseBoolNode(csb->csb_pool, blr_any);
-	rseBoolNode->rse = newInnerRse;
+	rseBoolNode->rse = newInnerRse2;
 	rseBoolNode->ownSavepoint = this->ownSavepoint;
 
 	orNode->arg2 = rseBoolNode;
@@ -2023,20 +2205,17 @@ BoolExprNode* RseBoolNode::convertNeqAllToNotAny(thread_db* tdbb, CompilerScratc
 	outerRseNeq->blrOp = blr_eql;
 
 	// If there was a boolean on the stream, append (AND) the new one
-	if (newInnerRse->rse_boolean)
+	if (newInnerRse2->rse_boolean)
 	{
 		andNode = FB_NEW_POOL(csb->csb_pool) BinaryBoolNode(csb->csb_pool, blr_and);
 
-		andNode->arg1 = newInnerRse->rse_boolean;
+		andNode->arg1 = newInnerRse2->rse_boolean;
 		andNode->arg2 = boolean;
 		boolean = andNode;
 	}
 
-	newInnerRse->rse_boolean = boolean;
+	newInnerRse2->rse_boolean = boolean;
 
 	SubExprNodeCopier copier(csb->csb_pool, csb);
 	return copier.copy(tdbb, static_cast<BoolExprNode*>(newNode));
 }
-
-
-}	// namespace Jrd

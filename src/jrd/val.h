@@ -31,7 +31,6 @@
 
 #include "../include/fb_blk.h"
 #include "../common/classes/array.h"
-#include "../common/classes/Nullable.h"
 #include "../jrd/intl_classes.h"
 #include "../jrd/MetaName.h"
 #include "../jrd/QualifiedName.h"
@@ -103,8 +102,8 @@ public:
 
 	const SortedValueList* init(thread_db* tdbb, Request* request) const;
 
-	TriState find(thread_db* tdbb, Request* request,
-				  const ValueExprNode* value, const dsc* desc) const;
+	bool find(thread_db* tdbb, Request* request,
+			  const ValueExprNode* value, const dsc* desc) const;
 
 private:
 	Firebird::HalfStaticArray<ValueExprNode*, 4> m_values;
@@ -229,9 +228,10 @@ struct impure_value_ex : public impure_value
 	blb* vlu_blob;
 };
 
-const int VLU_computed	= 1;	// An invariant sub-query has been computed
-const int VLU_null		= 2;	// An invariant sub-query computed to null
-const int VLU_checked	= 4;	// Constraint already checked in first read or assignment to argument/variable
+const int VLU_computed		= 1;	// An invariant sub-query has been computed
+const int VLU_null			= 2;	// An invariant sub-query computed to null
+const int VLU_checked		= 4;	// Constraint already checked in first read or assignment to argument/variable
+const int VLU_initialized	= 8;	// Variable initialized
 
 
 class Format : public pool_alloc<type_fmt>

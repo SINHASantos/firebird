@@ -490,6 +490,8 @@ type
 	IWireCryptPlugin_getSpecificDataPtr = function(this: IWireCryptPlugin; status: IStatus; keyType: PAnsiChar; length: CardinalPtr): BytePtr; cdecl;
 	IWireCryptPlugin_setSpecificDataPtr = procedure(this: IWireCryptPlugin; status: IStatus; keyType: PAnsiChar; length: Cardinal; data: BytePtr); cdecl;
 	ICryptKeyCallback_callbackPtr = function(this: ICryptKeyCallback; dataLength: Cardinal; data: Pointer; bufferLength: Cardinal; buffer: Pointer): Cardinal; cdecl;
+	ICryptKeyCallback_afterAttachPtr = function(this: ICryptKeyCallback; status: IStatus; dbName: PAnsiChar; attStatus: IStatus): Cardinal; cdecl;
+	ICryptKeyCallback_disposePtr = procedure(this: ICryptKeyCallback); cdecl;
 	IKeyHolderPlugin_keyCallbackPtr = function(this: IKeyHolderPlugin; status: IStatus; callback: ICryptKeyCallback): Integer; cdecl;
 	IKeyHolderPlugin_keyHandlePtr = function(this: IKeyHolderPlugin; status: IStatus; keyName: PAnsiChar): ICryptKeyCallback; cdecl;
 	IKeyHolderPlugin_useOnlyOwnKeysPtr = function(this: IKeyHolderPlugin; status: IStatus): Boolean; cdecl;
@@ -1533,6 +1535,7 @@ type
 		const PREPARE_PREFETCH_DETAILED_PLAN = Cardinal($10);
 		const PREPARE_PREFETCH_AFFECTED_RECORDS = Cardinal($20);
 		const PREPARE_PREFETCH_FLAGS = Cardinal($40);
+		const PREPARE_REQUIRE_SEMICOLON = Cardinal($80);
 		const PREPARE_PREFETCH_METADATA = Cardinal(IStatement.PREPARE_PREFETCH_TYPE or IStatement.PREPARE_PREFETCH_FLAGS or IStatement.PREPARE_PREFETCH_INPUT_PARAMETERS or IStatement.PREPARE_PREFETCH_OUTPUT_PARAMETERS);
 		const PREPARE_PREFETCH_ALL = Cardinal(IStatement.PREPARE_PREFETCH_METADATA or IStatement.PREPARE_PREFETCH_LEGACY_PLAN or IStatement.PREPARE_PREFETCH_DETAILED_PLAN or IStatement.PREPARE_PREFETCH_AFFECTED_RECORDS);
 		const FLAG_HAS_CURSOR = Cardinal($1);
@@ -1968,6 +1971,7 @@ type
 		const AUTH_SUCCESS = Integer(0);
 		const AUTH_MORE_DATA = Integer(1);
 		const AUTH_CONTINUE = Integer(2);
+		const AUTH_SUCCESS_WITH_DATA = Integer(3);
 
 	end;
 
@@ -2374,18 +2378,26 @@ type
 
 	CryptKeyCallbackVTable = class(VersionedVTable)
 		callback: ICryptKeyCallback_callbackPtr;
+		afterAttach: ICryptKeyCallback_afterAttachPtr;
+		dispose: ICryptKeyCallback_disposePtr;
 	end;
 
 	ICryptKeyCallback = class(IVersioned)
-		const VERSION = 2;
+		const VERSION = 3;
+		const NO_RETRY = Cardinal(0);
+		const DO_RETRY = Cardinal(1);
 
 		function callback(dataLength: Cardinal; data: Pointer; bufferLength: Cardinal; buffer: Pointer): Cardinal;
+		function afterAttach(status: IStatus; dbName: PAnsiChar; attStatus: IStatus): Cardinal;
+		procedure dispose();
 	end;
 
 	ICryptKeyCallbackImpl = class(ICryptKeyCallback)
 		constructor create;
 
 		function callback(dataLength: Cardinal; data: Pointer; bufferLength: Cardinal; buffer: Pointer): Cardinal; virtual; abstract;
+		function afterAttach(status: IStatus; dbName: PAnsiChar; attStatus: IStatus): Cardinal; virtual;
+		procedure dispose(); virtual;
 	end;
 
 	KeyHolderPluginVTable = class(PluginBaseVTable)
@@ -4044,6 +4056,7 @@ const
 	isc_dpb_upgrade_db = byte(97);
 	isc_dpb_parallel_workers = byte(100);
 	isc_dpb_worker_attach = byte(101);
+	isc_dpb_owner = byte(102);
 	isc_dpb_address = byte(1);
 	isc_dpb_addr_protocol = byte(1);
 	isc_dpb_addr_endpoint = byte(2);
@@ -4098,6 +4111,7 @@ const
 	isc_tpb_lock_timeout = byte(21);
 	isc_tpb_read_consistency = byte(22);
 	isc_tpb_at_snapshot_number = byte(23);
+	isc_tpb_auto_release_temp_blobid = byte(24);
 	isc_bpb_version1 = byte(1);
 	isc_bpb_source_type = byte(1);
 	isc_bpb_target_type = byte(2);
@@ -4178,7 +4192,6 @@ const
 	isc_info_svc_limbo_trans = byte(66);
 	isc_info_svc_running = byte(67);
 	isc_info_svc_get_users = byte(68);
-	isc_info_svc_auth_block = byte(69);
 	isc_info_svc_stdin = byte(78);
 	isc_spb_sec_userid = byte(5);
 	isc_spb_sec_groupid = byte(6);
@@ -4495,6 +4508,15 @@ const
 	fb_info_username = byte(147);
 	fb_info_sqlrole = byte(148);
 	fb_info_parallel_workers = byte(149);
+	fb_info_wire_out_packets = byte(150);
+	fb_info_wire_in_packets = byte(151);
+	fb_info_wire_out_bytes = byte(152);
+	fb_info_wire_in_bytes = byte(153);
+	fb_info_wire_snd_packets = byte(154);
+	fb_info_wire_rcv_packets = byte(155);
+	fb_info_wire_snd_bytes = byte(156);
+	fb_info_wire_rcv_bytes = byte(157);
+	fb_info_wire_roundtrips = byte(158);
 	fb_info_crypt_encrypted = $01;
 	fb_info_crypt_process = $02;
 	fb_feature_multi_statements = byte(1);
@@ -5700,6 +5722,25 @@ const
 	 isc_bad_par_workers = 335545286;
 	 isc_idx_expr_not_found = 335545287;
 	 isc_idx_cond_not_found = 335545288;
+	 isc_uninitialized_var = 335545289;
+	 isc_param_not_exist = 335545290;
+	 isc_param_no_default_not_specified = 335545291;
+	 isc_param_multiple_assignments = 335545292;
+	 isc_invalid_date_format = 335545293;
+	 isc_invalid_raw_string_in_date_format = 335545294;
+	 isc_invalid_data_type_for_date_format = 335545295;
+	 isc_incompatible_date_format_with_current_date_type = 335545296;
+	 isc_value_for_pattern_is_out_of_range = 335545297;
+	 isc_month_name_mismatch = 335545298;
+	 isc_incorrect_hours_period = 335545299;
+	 isc_data_for_format_is_exhausted = 335545300;
+	 isc_trailing_part_of_string = 335545301;
+	 isc_pattern_cant_be_used_without_other_pattern = 335545302;
+	 isc_pattern_cant_be_used_without_other_pattern_and_vice_versa = 335545303;
+	 isc_incompatible_format_patterns = 335545304;
+	 isc_only_one_pattern_can_be_used = 335545305;
+	 isc_can_not_use_same_pattern_twice = 335545306;
+	 isc_sysf_invalid_gen_uuid_version = 335545307;
 	 isc_gfix_db_name = 335740929;
 	 isc_gfix_invalid_sw = 335740930;
 	 isc_gfix_incmp_sw = 335740932;
@@ -8089,6 +8130,27 @@ begin
 	Result := CryptKeyCallbackVTable(vTable).callback(Self, dataLength, data, bufferLength, buffer);
 end;
 
+function ICryptKeyCallback.afterAttach(status: IStatus; dbName: PAnsiChar; attStatus: IStatus): Cardinal;
+begin
+	if (vTable.version < 3) then begin
+		FbException.setVersionError(status, 'ICryptKeyCallback', vTable.version, 3);
+		Result := 0;
+	end
+	else begin
+		Result := CryptKeyCallbackVTable(vTable).afterAttach(Self, status, dbName, attStatus);
+	end;
+	FbException.checkException(status);
+end;
+
+procedure ICryptKeyCallback.dispose();
+begin
+	if (vTable.version < 3) then begin
+	end
+	else begin
+		CryptKeyCallbackVTable(vTable).dispose(Self);
+	end;
+end;
+
 function IKeyHolderPlugin.keyCallback(status: IStatus; callback: ICryptKeyCallback): Integer;
 begin
 	Result := KeyHolderPluginVTable(vTable).keyCallback(Self, status, callback);
@@ -9240,7 +9302,7 @@ end;
 function ITracePlugin.trace_dsql_restart(connection: ITraceDatabaseConnection; transaction: ITraceTransaction; statement: ITraceSQLStatement; number: Cardinal): Boolean;
 begin
 	if (vTable.version < 4) then begin
-		Result := false;
+		Result := true;
 	end
 	else begin
 		Result := TracePluginVTable(vTable).trace_dsql_restart(Self, connection, transaction, statement, number);
@@ -9250,7 +9312,7 @@ end;
 function ITracePlugin.trace_proc_compile(connection: ITraceDatabaseConnection; procedure_: ITraceProcedure; time_millis: Int64; proc_result: Cardinal): Boolean;
 begin
 	if (vTable.version < 5) then begin
-		Result := false;
+		Result := true;
 	end
 	else begin
 		Result := TracePluginVTable(vTable).trace_proc_compile(Self, connection, procedure_, time_millis, proc_result);
@@ -9260,7 +9322,7 @@ end;
 function ITracePlugin.trace_func_compile(connection: ITraceDatabaseConnection; function_: ITraceFunction; time_millis: Int64; func_result: Cardinal): Boolean;
 begin
 	if (vTable.version < 5) then begin
-		Result := false;
+		Result := true;
 	end
 	else begin
 		Result := TracePluginVTable(vTable).trace_func_compile(Self, connection, function_, time_millis, func_result);
@@ -9270,7 +9332,7 @@ end;
 function ITracePlugin.trace_trigger_compile(connection: ITraceDatabaseConnection; trigger: ITraceTrigger; time_millis: Int64; trig_result: Cardinal): Boolean;
 begin
 	if (vTable.version < 5) then begin
-		Result := false;
+		Result := true;
 	end
 	else begin
 		Result := TracePluginVTable(vTable).trace_trigger_compile(Self, connection, trigger, time_millis, trig_result);
@@ -13417,6 +13479,34 @@ begin
 	end
 end;
 
+function ICryptKeyCallbackImpl_afterAttachDispatcher(this: ICryptKeyCallback; status: IStatus; dbName: PAnsiChar; attStatus: IStatus): Cardinal; cdecl;
+begin
+	Result := 0;
+	try
+		Result := ICryptKeyCallbackImpl(this).afterAttach(status, dbName, attStatus);
+	except
+		on e: Exception do FbException.catchException(status, e);
+	end
+end;
+
+function ICryptKeyCallbackImpl.afterAttach(status: IStatus; dbName: PAnsiChar; attStatus: IStatus): Cardinal;
+begin
+	Result := 0;
+end;
+
+procedure ICryptKeyCallbackImpl_disposeDispatcher(this: ICryptKeyCallback); cdecl;
+begin
+	try
+		ICryptKeyCallbackImpl(this).dispose();
+	except
+		on e: Exception do FbException.catchException(nil, e);
+	end
+end;
+
+procedure ICryptKeyCallbackImpl.dispose();
+begin
+end;
+
 var
 	ICryptKeyCallbackImpl_vTable: CryptKeyCallbackVTable;
 
@@ -17502,8 +17592,10 @@ initialization
 	IWireCryptPluginImpl_vTable.setSpecificData := @IWireCryptPluginImpl_setSpecificDataDispatcher;
 
 	ICryptKeyCallbackImpl_vTable := CryptKeyCallbackVTable.create;
-	ICryptKeyCallbackImpl_vTable.version := 2;
+	ICryptKeyCallbackImpl_vTable.version := 3;
 	ICryptKeyCallbackImpl_vTable.callback := @ICryptKeyCallbackImpl_callbackDispatcher;
+	ICryptKeyCallbackImpl_vTable.afterAttach := @ICryptKeyCallbackImpl_afterAttachDispatcher;
+	ICryptKeyCallbackImpl_vTable.dispose := @ICryptKeyCallbackImpl_disposeDispatcher;
 
 	IKeyHolderPluginImpl_vTable := KeyHolderPluginVTable.create;
 	IKeyHolderPluginImpl_vTable.version := 5;
