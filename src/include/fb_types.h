@@ -32,6 +32,7 @@
 #ifndef INCLUDE_FB_TYPES_H
 #define INCLUDE_FB_TYPES_H
 
+#include <cstddef>
 #include <limits.h>
 
 #if SIZEOF_LONG == 8
@@ -132,8 +133,12 @@ vmslock.cpp:LOCK_convert() calls VMS' sys$enq that may require this signature,
 but our code never uses the return value. */
 typedef int (*lock_ast_t)(void*);
 
-/* Number of elements in an array */
-#define FB_NELEM(x)	((int)(sizeof(x) / sizeof(x[0])))
+// Number of elements in an array
+template <typename T, std::size_t N>
+constexpr FB_SIZE_T FB_NELEM(const T (&)[N])
+{
+	return static_cast<FB_SIZE_T>(N);
+}
 
 // Intl types
 typedef SSHORT CHARSET_ID;
@@ -145,7 +150,7 @@ typedef ULONG StreamType;
 
 // Alignment rule
 template <typename T>
-inline T FB_ALIGN(T n, uintptr_t b)
+constexpr T FB_ALIGN(T n, uintptr_t b)
 {
 	return (T) ((((uintptr_t) n) + b - 1) & ~(b - 1));
 }

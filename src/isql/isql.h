@@ -35,6 +35,7 @@
 
 #include "../jrd/flags.h"
 #include "../jrd/constants.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <firebird/Interface.h>
 
@@ -72,7 +73,7 @@ enum processing_state {
 	EXTRACTALL	=	8,
 	FETCH		=	9,
 	OBJECT_NOT_FOUND = 10,
-	ERR_BUFFER_OVERFLOW = 11
+	TRUNCATED = 11
 };
 
 // Which blob subtypes to print
@@ -309,6 +310,30 @@ struct IsqlVar
 		void* setPtr;
 	};
 	TypeMix value;
+};
+
+class IsqlWireStats
+{
+public:
+	explicit IsqlWireStats(Firebird::IAttachment* att) :
+		m_att(att)
+	{}
+
+	bool print(bool initial);
+	bool get(bool initial);
+
+private:
+
+	Firebird::IAttachment* m_att;
+	FB_UINT64 m_snd_packets = 0;
+	FB_UINT64 m_rcv_packets = 0;
+	FB_UINT64 m_out_packets = 0;
+	FB_UINT64 m_in_packets = 0;
+	FB_UINT64 m_snd_bytes = 0;
+	FB_UINT64 m_rcv_bytes = 0;
+	FB_UINT64 m_out_bytes = 0;
+	FB_UINT64 m_in_bytes = 0;
+	FB_UINT64 m_roundtrips = 0;
 };
 
 #endif // ISQL_ISQL_H

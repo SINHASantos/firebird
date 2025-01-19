@@ -312,16 +312,16 @@ private:
 	public:
 		operator Ods::pag*()
 		{
-			return reinterpret_cast<Ods::pag*>(FB_ALIGN(buf, PAGE_ALIGNMENT));
+			return reinterpret_cast<Ods::pag*>(buf);
 		}
 
 		Ods::pag* operator->()
 		{
-			return reinterpret_cast<Ods::pag*>(FB_ALIGN(buf, PAGE_ALIGNMENT));
+			return reinterpret_cast<Ods::pag*>(buf);
 		}
 
 	private:
-		char buf[MAX_PAGE_SIZE + PAGE_ALIGNMENT - 1];
+		alignas(DIRECT_IO_BLOCK_SIZE) char buf[MAX_PAGE_SIZE];
 	};
 
 	class DbInfo;
@@ -364,6 +364,7 @@ private:
 	void lockAndReadHeader(thread_db* tdbb, unsigned flags = 0);
 	static const unsigned CRYPT_HDR_INIT =		0x01;
 	static const unsigned CRYPT_HDR_NOWAIT =	0x02;
+	static const unsigned CRYPT_RELOAD_PLUGIN =	0x04;
 
 	void addClumplet(Firebird::string& value, Firebird::ClumpletReader& block, UCHAR tag);
 	void calcDigitalSignature(thread_db* tdbb, Firebird::string& signature, const class Header& hdr);

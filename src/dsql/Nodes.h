@@ -658,6 +658,9 @@ public:
 		target = node ? node->dsqlFieldRemapper(visitor) : NULL;
 	}
 
+	// Check if expression returns deterministic result
+	virtual bool deterministic() const;
+
 	// Check if expression could return NULL or expression can turn NULL into a true/false.
 	virtual bool possiblyUnknown() const;
 
@@ -770,10 +773,8 @@ class ValueExprNode : public ExprNode
 {
 public:
 	ValueExprNode(Type aType, MemoryPool& pool)
-		: ExprNode(aType, pool),
-		  nodScale(0)
+		: ExprNode(aType, pool)
 	{
-		dsqlDesc.clear();
 	}
 
 public:
@@ -848,7 +849,7 @@ public:
 	virtual dsc* execute(thread_db* tdbb, Request* request) const = 0;
 
 public:
-	SCHAR nodScale;
+	SCHAR nodScale = 0;
 
 protected:
 	dsc dsqlDesc;
@@ -1272,6 +1273,12 @@ public:
 		items.push(arg1);
 	}
 
+	ValueListNode(MemoryPool& pool)
+		: TypedNode<ListExprNode, ExprNode::TYPE_VALUE_LIST>(pool),
+		  items(pool, INITIAL_CAPACITY)
+	{
+	}
+
 	virtual void getChildren(NodeRefsHolder& holder, bool dsql) const
 	{
 		ListExprNode::getChildren(holder, dsql);
@@ -1290,6 +1297,11 @@ public:
 	{
 		items.insert(0, argn);
 		return this;
+	}
+
+	void ensureCapacity(unsigned count)
+	{
+		items.ensureCapacity(count);
 	}
 
 	void clear()
@@ -1434,6 +1446,7 @@ public:
 		TYPE_HANDLER,
 		TYPE_LABEL,
 		TYPE_LINE_COLUMN,
+		TYPE_LOCAL_DECLARATIONS,
 		TYPE_LOOP,
 		TYPE_MERGE,
 		TYPE_MERGE_SEND,
@@ -1445,6 +1458,7 @@ public:
 		TYPE_RETURN,
 		TYPE_SAVEPOINT,
 		TYPE_SELECT,
+		TYPE_SELECT_MESSAGE,
 		TYPE_SESSION_MANAGEMENT_WRAPPER,
 		TYPE_SET_GENERATOR,
 		TYPE_STALL,
@@ -1453,7 +1467,7 @@ public:
 		TYPE_TRUNCATE_LOCAL_TABLE,
 		TYPE_UPDATE_OR_INSERT,
 
-		TYPE_EXT_INIT_PARAMETER,
+		TYPE_EXT_INIT_PARAMETERS,
 		TYPE_EXT_TRIGGER
 	};
 

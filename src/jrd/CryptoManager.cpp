@@ -201,9 +201,9 @@ namespace Jrd {
 			Jrd::BufferDesc bdb(bcb);
 			bdb.bdb_page = Jrd::HEADER_PAGE_NUMBER;
 
-			UCHAR* h = FB_NEW_POOL(*Firebird::MemoryPool::getContextPool()) UCHAR[dbb->dbb_page_size + PAGE_ALIGNMENT];
+			UCHAR* h = FB_NEW_POOL(*MemoryPool::getContextPool()) UCHAR[dbb->dbb_page_size + dbb->getIOBlockSize()];
 			buffer.reset(h);
-			h = FB_ALIGN(h, PAGE_ALIGNMENT);
+			h = FB_ALIGN(h, dbb->getIOBlockSize());
 			bdb.bdb_buffer = (Ods::pag*) h;
 
 			Jrd::FbStatusVector* const status = tdbb->tdbb_status_vector;
@@ -225,7 +225,29 @@ namespace Jrd {
 			if (bak_state != Ods::hdr_nbak_normal)
 				diff_page = bm->getPageIndex(tdbb, bdb.bdb_page.getPageNum());
 
+			bool readPageAsNormal = false;
 			if (bak_state == Ods::hdr_nbak_normal || !diff_page)
+				readPageAsNormal = true;
+			else
+			{
+				if (!bm->readDifference(tdbb, diff_page, page))
+				{
+					if (page->pag_type == 0 && page->pag_generation == 0 && page->pag_scn == 0)
+					{
+						// We encountered a page which was allocated, but never written to the
+						// difference file. In this case we try to read the page from database. With
+						// this approach if the page was old we get it from DISK, and if the page
+						// was new IO error (EOF) or BUGCHECK (checksum error) will be the result.
+						// Engine is not supposed to read a page which was never written unless
+						// this is a merge process.
+						readPageAsNormal = true;
+					}
+					else
+						ERR_punt();
+				}
+			}
+
+			if (readPageAsNormal)
 			{
 				// Read page from disk as normal
 				int retryCount = 0;
@@ -246,11 +268,6 @@ namespace Jrd {
 						}
 					}
 				}
-			}
-			else
-			{
-				if (!bm->readDifference(tdbb, diff_page, page))
-					ERR_punt();
 			}
 
 			setHeader(h);
@@ -350,7 +367,7 @@ namespace Jrd {
 			return;
 
 		fb_assert(tdbb);
-		lockAndReadHeader(tdbb, CRYPT_HDR_NOWAIT);
+		lockAndReadHeader(tdbb, CRYPT_HDR_NOWAIT | CRYPT_RELOAD_PLUGIN);
 	}
 
 	void CryptoManager::lockAndReadHeader(thread_db* tdbb, unsigned flags)
@@ -390,9 +407,15 @@ namespace Jrd {
 		crypt = hdr->hdr_flags & Ods::hdr_encrypted;
 		process = hdr->hdr_flags & Ods::hdr_crypt_process;
 
+		if (flags & CRYPT_RELOAD_PLUGIN && cryptPlugin)
+		{
+			PluginManagerInterfacePtr()->releasePlugin(cryptPlugin);
+			cryptPlugin = NULL;
+		}
+
 		// tdbb w/o attachment comes when database is shutting down in the end of detachDatabase()
 		// the only needed here page is header, i.e. we can live w/o cryptPlugin
-		if ((crypt || process) && tdbb->getAttachment())
+		if ((crypt || process) && !cryptPlugin && tdbb->getAttachment())
 		{
 			ClumpletWriter hc(ClumpletWriter::UnTagged, hdr->hdr_page_size);
 			hdr.getClumplets(hc);
@@ -401,56 +424,18 @@ namespace Jrd {
 			else
 				keyName = "";
 
-			if (!cryptPlugin)
+			loadPlugin(tdbb, hdr->hdr_crypt_plugin);
+			pluginName = hdr->hdr_crypt_plugin;
+			string valid;
+			calcValidation(valid, cryptPlugin);
+			if (hc.find(Ods::HDR_crypt_hash))
 			{
-				loadPlugin(tdbb, hdr->hdr_crypt_plugin);
-				pluginName = hdr->hdr_crypt_plugin;
-				string valid;
-				calcValidation(valid, cryptPlugin);
-				if (hc.find(Ods::HDR_crypt_hash))
-				{
-					hc.getString(hash);
-					if (hash != valid)
-						(Arg::Gds(isc_bad_crypt_key) << keyName).raise();
-				}
-				else
-					hash = valid;
+				hc.getString(hash);
+				if (hash != valid)
+					(Arg::Gds(isc_bad_crypt_key) << keyName).raise();
 			}
 			else
-			{
-				for (GetPlugins<IKeyHolderPlugin> keyControl(IPluginManager::TYPE_KEY_HOLDER, dbb.dbb_config);
-						keyControl.hasData(); keyControl.next())
-				{
-					// check does keyHolder want to provide a key for us
-					IKeyHolderPlugin* keyHolder = keyControl.plugin();
-
-					FbLocalStatus st;
-					int keyCallbackRc = keyHolder->keyCallback(&st, tdbb->getAttachment()->att_crypt_callback);
-					st.check();
-					if (!keyCallbackRc)
-						continue;
-
-					// validate a key
-					AutoPlugin<IDbCryptPlugin> crypt(checkFactory->makeInstance());
-					setDbInfo(crypt);
-					crypt->setKey(&st, 1, &keyHolder, keyName.c_str());
-
-
-					string valid;
-					calcValidation(valid, crypt);
-					if (hc.find(Ods::HDR_crypt_hash))
-					{
-						hc.getString(hash);
-						if (hash == valid)
-						{
-							// unload old plugin and set new one
-							PluginManagerInterfacePtr()->releasePlugin(cryptPlugin);
-							cryptPlugin = NULL;
-							cryptPlugin = crypt.release();
-						}
-					}
-				}
-			}
+				hash = valid;
 		}
 
 		if (cryptPlugin && (flags & CRYPT_HDR_INIT))

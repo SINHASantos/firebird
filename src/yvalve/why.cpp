@@ -831,11 +831,11 @@ private:
 		explicit CtrlCHandler(MemoryPool& p)
 			: ShutdownInit(p)
 		{
+			shutdownSemaphore = &semaphore;
 			Thread::start(shutdownThread, 0, 0, &handle);
 
 			procInt = ISC_signal(SIGINT, handlerInt, 0);
 			procTerm = ISC_signal(SIGTERM, handlerTerm, 0);
-			shutdownSemaphore = &semaphore;
 		}
 
 		~CtrlCHandler()
@@ -876,7 +876,7 @@ namespace Why
 	class StatusVector : public AutoIface<BaseStatus<StatusVector> >
 	{
 	public:
-		explicit StatusVector(ISC_STATUS* v = NULL) throw()
+		explicit StatusVector(ISC_STATUS* v = NULL) noexcept
 			: localVector(v ? v : localStatus)
 		{ }
 
@@ -1618,7 +1618,7 @@ ISC_STATUS API_ROUTINE isc_array_lookup_desc(ISC_STATUS* userStatus, FB_API_HAND
 		RefPtr<YAttachment> attachment(translateHandle(attachments, dbHandle));
 		RefPtr<YTransaction> transaction(translateHandle(transactions, traHandle));
 
-		iscArrayLookupDescImpl(attachment, transaction, relationName, fieldName, desc);
+		iscArrayLookupDescImpl(attachment, transaction, relationName, fieldName, desc, nullptr);
 	}
 	catch (const Exception& e)
 	{
@@ -1652,7 +1652,7 @@ ISC_STATUS API_ROUTINE isc_attach_database(ISC_STATUS* userStatus, SSHORT fileLe
 			return status[1];
 
 		YAttachment* attachment = dispatcher->attachDatabase(&statusWrapper, pathName.c_str(),
-			dpbLength, reinterpret_cast<const UCHAR*>(dpb));
+			static_cast<USHORT>(dpbLength), reinterpret_cast<const UCHAR*>(dpb));
 		if (status.getState() & IStatus::STATE_ERRORS)
 			return status[1];
 

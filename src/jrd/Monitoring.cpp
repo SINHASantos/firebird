@@ -507,7 +507,10 @@ MonitoringSnapshot::MonitoringSnapshot(thread_db* tdbb, MemoryPool& pool)
 		if (LCK_lock(tdbb, lock, LCK_EX, LCK_NO_WAIT))
 		{
 			LCK_release(tdbb, lock);
+
+			MonitoringData::Guard guard(dbb->dbb_monitoring_data);
 			dbb->dbb_monitoring_data->cleanup(attId);
+
 			continue;
 		}
 
@@ -541,7 +544,6 @@ MonitoringSnapshot::MonitoringSnapshot(thread_db* tdbb, MemoryPool& pool)
 	{ // scope for the guard
 
 		MonitoringData::Guard guard(dbb->dbb_monitoring_data);
-
 		dbb->dbb_monitoring_data->read(userNamePtr, temp_space);
 	}
 
@@ -942,9 +944,7 @@ void Monitoring::putDatabase(thread_db* tdbb, SnapshotData::DumpRecord& record)
 	record.storeInteger(f_mon_db_na, dbb->getLatestAttachmentId());
 	record.storeInteger(f_mon_db_ns, dbb->getLatestStatementId());
 
-	char guidBuffer[GUID_BUFF_SIZE];
-	GuidToString(guidBuffer, &dbb->dbb_guid);
-	record.storeString(f_mon_db_guid, string(guidBuffer));
+	record.storeString(f_mon_db_guid, dbb->dbb_guid.value().toString());
 	record.storeString(f_mon_db_file_id, dbb->getUniqueFileId());
 
 	record.storeInteger(f_mon_db_repl_mode, dbb->dbb_replica_mode);
@@ -1138,6 +1138,9 @@ void Monitoring::putTransaction(SnapshotData::DumpRecord& record, const jrd_tra*
 	// statistics
 	const int stat_id = fb_utils::genUniqueId();
 	record.storeGlobalId(f_mon_tra_stat_id, getGlobalId(stat_id));
+	// auto release temp blobid flag
+	temp = (transaction->tra_flags & TRA_auto_release_temp_blobid) ? 1 : 0;
+	record.storeInteger(f_mon_tra_auto_release_temp_blobid, temp);
 
 	record.write();
 
