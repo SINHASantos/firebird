@@ -178,7 +178,7 @@ ISC_STATUS filter_acl(USHORT action, BlobControl* control)
 	USHORT length;
 	const ISC_STATUS status = caller(isc_blob_filter_get_segment, control, (USHORT) l, temp, &length);
 
-	TEXT line[BUFFER_SMALL];
+	TEXT line[BUFFER_LARGE];
 
 	if (!status)
 	{
@@ -198,10 +198,27 @@ ISC_STATUS filter_acl(USHORT action, BlobControl* control)
 				while ((c = *p++) != 0)
 				{
 					all_wild = false;
-					sprintf(out, "%s%.*s, ", acl_ids[c], *p, p + 1);
+					sprintf(out, "%s%.*s", acl_ids[c], *p, p + 1);
 					p += *p + 1;
 					while (*out)
 						++out;
+
+					switch (c)
+					{
+						case id_view:
+						case id_package:
+						case id_procedure:
+						case id_trigger:
+						case id_function:
+							sprintf(out, ".%.*s", *p, p + 1);
+							p += *p + 1;
+							while (*out)
+								++out;
+							break;
+					}
+
+					*out++ = ',';
+					*out++ = ' ';
 				}
 				if (all_wild)
 				{
@@ -1309,7 +1326,6 @@ static ISC_STATUS string_filter(USHORT action, BlobControl* control)
  *
  **************************************/
 	filter_tmp* string;
-	USHORT length;
 
 	switch (action)
 	{
@@ -1322,10 +1338,14 @@ static ISC_STATUS string_filter(USHORT action, BlobControl* control)
 		return FB_SUCCESS;
 
 	case isc_blob_filter_get_segment:
+	{
 		if (!(string = (filter_tmp*) control->ctl_data[1]))
 			return isc_segstr_eof;
-		length = string->tmp_length - control->ctl_data[2];
-		if (length > control->ctl_buffer_length)
+
+		USHORT length = string->tmp_length - control->ctl_data[2];
+		const bool outOfBuffer = (length > control->ctl_buffer_length);
+
+		if (outOfBuffer)
 			length = control->ctl_buffer_length;
 		memcpy(control->ctl_buffer, string->tmp_string + (USHORT) control->ctl_data[2], length);
 		control->ctl_data[2] += length;
@@ -1334,7 +1354,8 @@ static ISC_STATUS string_filter(USHORT action, BlobControl* control)
 			control->ctl_data[2] = 0;
 		}
 		control->ctl_segment_length = length;
-		return (length <= control->ctl_buffer_length) ? FB_SUCCESS : isc_segment;
+		return (!outOfBuffer) ? FB_SUCCESS : isc_segment;
+	}
 
 	case isc_blob_filter_put_segment:
 	case isc_blob_filter_create:
