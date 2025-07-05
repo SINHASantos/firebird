@@ -186,7 +186,7 @@ type
 		pin_records_fetched	: Int64;
 	end;
 
-	Dsc = Record
+	ParamDsc = Record
 		dsc_dtype, dsc_scale: Byte;
 		dsc_length, dsc_sub_type, dsc_flags: Int16;
 		dsc_address: ^Byte;
@@ -10016,7 +10016,7 @@ end;
 procedure IProfilerSession.defineStatement2(status: IStatus; statementId: Int64; parentStatementId: Int64; type_: PAnsiChar; schemaName: PAnsiChar; packageName: PAnsiChar; routineName: PAnsiChar; sqlText: PAnsiChar);
 begin
 	if (vTable.version < 4) then begin
-		deprecatedDefineStatement(status, statementId, parentStatementId, type, packageName, routineName, sqlText);
+		deprecatedDefineStatement(status, statementId, parentStatementId, type_, packageName, routineName, sqlText);
 	end
 	else begin
 		ProfilerSessionVTable(vTable).defineStatement2(Self, status, statementId, parentStatementId, type_, schemaName, packageName, routineName, sqlText);

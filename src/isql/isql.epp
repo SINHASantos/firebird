@@ -7051,9 +7051,10 @@ static bool checkSpecial(TEXT* const p, const int length, const double value)
 	if (setValues.List) {
 		isqlGlob.printf("%s%s", t, NEWLINE);
 	}
-	// We're working under the assumption that length is the maximum number of characters to produce,
-	// and that the available buffer is at least 1 byte longer for nul-termination.
-	const size_t bufSize = static_cast<size_t>(length) + 1;
+	// We're working under the assumption that length is the maximum number of characters to
+	// produce of the value, and that the available buffer is at least 2 bytes longer for
+	// a space (column separator) and nul-termination.
+	const size_t bufSize = static_cast<size_t>(length) + 2;
 	snprintf(p, bufSize, "%*.*s ", length, length, t);
 
 	return true;
@@ -7073,8 +7074,9 @@ static unsigned print_item(TEXT** s, const IsqlVar* var, const unsigned length)
  *
  **************************************/
 	// We're working under the assumption that length is the maximum number of characters to
-	// produce, and that the available buffer is at least 1 byte longer for nul-termination.
-	const size_t bufSize = static_cast<size_t>(length) + 1;
+	// produce of the value, and that the available buffer is at least 2 bytes longer for
+	// a space (column separator) and nul-termination.
+	const size_t bufSize = static_cast<size_t>(length) + 2;
 	const char* convErr = "Conversion error";
 	TEXT d[64];
 	TEXT* p = *s;
@@ -7138,7 +7140,7 @@ static unsigned print_item(TEXT** s, const IsqlVar* var, const unsigned length)
 			blobid = var->value.blobid;
 			snprintf(blobbuf, sizeof(blobbuf), "%" xLONGFORMAT":%" xLONGFORMAT,
 				blobid->gds_quad_high, blobid->gds_quad_low);
-			snprintf(p, bufSize, "%*s ", MIN(17, length), blobbuf);
+			snprintf(p, bufSize, "%*s ", MAX(17, length), blobbuf);
 			break;
 
 		case SQL_BLOB:
@@ -7148,7 +7150,7 @@ static unsigned print_item(TEXT** s, const IsqlVar* var, const unsigned length)
 			blobid = var->value.blobid;
 			snprintf(blobbuf, sizeof(blobbuf), "%" xLONGFORMAT":%" xLONGFORMAT,
 				blobid->gds_quad_high, blobid->gds_quad_low);
-			snprintf(p, bufSize, "%*s ", MIN(17, length), blobbuf);
+			snprintf(p, bufSize, "%*s ", MAX(17, length), blobbuf);
 			if (setValues.List)
 			{
 				isqlGlob.printf("%s%s", blobbuf, NEWLINE);
@@ -7505,7 +7507,7 @@ static unsigned print_item(TEXT** s, const IsqlVar* var, const unsigned length)
 				isc_decode_sql_time(var->value.asTime, &times);
 				ULONG fractions = (*var->value.asTime) % ISC_TIME_SECONDS_PRECISION;
 
-				snprintf(d, sizeof(s), "%2.2d:%2.2d:%2.2d.%4.4" ULONGFORMAT,
+				snprintf(d, sizeof(d), "%2.2d:%2.2d:%2.2d.%4.4" ULONGFORMAT,
 					times.tm_hour, times.tm_min, times.tm_sec, fractions);
 
 				snprintf(p, bufSize, "%-*.*s ", length, length, d);
@@ -7717,6 +7719,7 @@ static void print_item_numeric(SINT64 value, int length, int scale, TEXT* buf)
  **************************************/
 	// We're working under the assumption that length is the maximum number of characters to
 	// produce, and that the available buffer is at least 1 byte longer for nul-termination.
+	// Contrary to elsewhere, here we don't need to add one byte for a column separator.
 	const size_t bufSize = static_cast<size_t>(length) + 1;
 	// Handle special case of no negative scale, no '.' required!
 	if (scale >= 0)
@@ -8301,7 +8304,7 @@ static unsigned process_message_display(Firebird::IMessageMetadata* message, uns
 		else if (isqlGlob.att_charset == CS_UTF8)
 			disp_length = MAX(disp_length, namelength * 4);
 
-		// The total line length
+		// The total line length (display length of value + space, i.e. column separator)
 		linelength += disp_length + 1;
 	}
 
